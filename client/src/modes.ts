@@ -58,7 +58,17 @@ export function setVnc(serverWs: WebSocket) {
 
 export function startX11vncDaemon() {
   const display = process.env.DISPLAY ?? ':0';
-  state.x11vncProcess = spawn('x11vnc', ['-display', display, '-forever', '-nopw', '-quiet', '-rfbport', String(VNC_PORT)], { detached: false });
+  state.x11vncProcess = spawn('x11vnc', [
+    '-display', display,
+    '-forever',   // keep running after client disconnects
+    '-shared',    // allow multiple simultaneous clients
+    '-nopw',
+    '-quiet',
+    '-rfbport', String(VNC_PORT),
+    '-wait', '10',    // poll every 10ms instead of default 75ms
+    '-defer', '0',    // send updates immediately, don't batch
+    '-speeds', 'lan', // assume LAN speed, skip slow-connection optimisations
+  ], { detached: false });
   state.x11vncProcess.on('exit', code => {
     console.log(`[vnc] x11vnc exited (${code}) — restarting in 5s`);
     state.x11vncProcess = null;

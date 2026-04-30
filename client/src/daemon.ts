@@ -36,6 +36,22 @@ export function log(level: 'info' | 'warn' | 'error', msg: string) {
   }
 }
 
+// ── Audio polling ─────────────────────────────────────────────────────────────
+// PipeWire starts after the daemon; retry every 15s until sinks are found.
+function pollAudioSinks(attempt = 0) {
+  const delay = attempt === 0 ? 5000 : 15000;
+  setTimeout(async () => {
+    try {
+      const sinks = await getAudioSinks();
+      if (sinks.length === 0) { pollAudioSinks(attempt + 1); return; }
+      const astState = await getAudioState();
+      log('info', `[audio] found ${sinks.length} sink(s)`);
+      if (state.serverWs?.readyState === WebSocket.OPEN)
+        state.serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state: astState }));
+    } catch { pollAudioSinks(attempt + 1); }
+  }, delay);
+}
+
 // ── Server WebSocket ──────────────────────────────────────────────────────────
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let ndiPollInterval:   ReturnType<typeof setInterval> | null = null;
@@ -72,14 +88,8 @@ function connectToServer() {
         state.serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
     }, 20000);
 
-    setTimeout(async () => {
-      try {
-        const sinks = await getAudioSinks();
-        const astState = await getAudioState();
-        if (state.serverWs?.readyState === WebSocket.OPEN)
-          state.serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state: astState }));
-      } catch {}
-    }, 5000);
+    // Poll for audio sinks — PipeWire starts after the daemon so retry until found
+    pollAudioSinks();
   });
 
   state.serverWs.on('message', async (data) => {
@@ -103,6 +113,10 @@ function connectToServer() {
       }
       case 'start_vnc_bridge':
         setVnc(state.serverWs!);
+        break;
+      case 'vnc_upstream_closed':
+        // Server closed the upstream — reconnect so next client gets a fresh handshake
+        setTimeout(() => { if (state.serverWs?.readyState === WebSocket.OPEN) setVnc(state.serverWs!); }, 500);
         break;
       case 'set_audio_output':
         if (msg.sink) execFile('pactl', ['set-default-sink', msg.sink], { env: process.env }, () => {});

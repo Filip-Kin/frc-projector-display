@@ -123,6 +123,11 @@ export function handleVncUpstream(ws: WebSocket, rawPin: string) {
     vncUpstreamBuffer.delete(pin);
     const client = vncClients.get(pin);
     if (client?.readyState === WebSocket.OPEN) client.close();
+    // Tell device to reconnect upstream so next client gets a fresh handshake
+    const ctrl = controllers.get(pin);
+    if (ctrl?.readyState === WebSocket.OPEN) {
+      ctrl.send(JSON.stringify({ type: 'vnc_upstream_closed' }));
+    }
   });
 }
 
@@ -142,5 +147,10 @@ export function handleVncClient(ws: WebSocket, rawPin: string) {
     const up = vncUpstream.get(pin);
     if (up?.readyState === WebSocket.OPEN) up.send(data);
   });
-  ws.on('close', () => { if (vncClients.get(pin) === ws) vncClients.delete(pin); });
+  ws.on('close', () => {
+    if (vncClients.get(pin) === ws) vncClients.delete(pin);
+    // Close upstream so device reconnects with fresh handshake for next client
+    const up = vncUpstream.get(pin);
+    if (up?.readyState === WebSocket.OPEN) up.close();
+  });
 }

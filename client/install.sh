@@ -102,6 +102,7 @@ xset s off &
 xset -dpms &
 xset s noblank &
 unclutter -idle 1 -root &
+systemctl --user start pipewire wireplumber pipewire-pulse 2>/dev/null &
 ${CHROMIUM_BIN} --kiosk --no-sandbox --disable-infobars \\
   --disable-translate --disable-features=TranslateUI \\
   --no-first-run --disable-default-apps \\
@@ -339,6 +340,10 @@ systemctl enable display-daemon.service
 # ── Graphical target ───────────────────────────────────────────────────────────
 echo "[13] Setting graphical boot target..."
 systemctl set-default graphical.target
+
+# ── User linger (starts PipeWire/user services at boot without a login) ───────
+echo "[14b] Enabling user linger for ${SERVICE_USER}..."
+loginctl enable-linger "${SERVICE_USER}" 2>/dev/null || true
 
 # ── Power button → immediate shutdown ─────────────────────────────────────────
 echo "[14] Configuring power button..."
