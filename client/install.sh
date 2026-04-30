@@ -33,22 +33,14 @@ else
 fi
 echo "[1] Package manager: $PKG_MGR"
 
-# ── Node.js 20 ────────────────────────────────────────────────────────────────
-if ! command -v node &>/dev/null || [[ "$(node --version 2>/dev/null)" != v20* ]]; then
-  echo "[2] Installing Node.js 20..."
-  case $PKG_MGR in
-    apt)
-      apt-get update -qq
-      curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
-      apt-get install -y nodejs >/dev/null ;;
-    dnf)
-      curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null
-      dnf install -y nodejs >/dev/null ;;
-    pacman)
-      pacman -Sy --noconfirm nodejs npm >/dev/null ;;
-  esac
+# ── Bun (JavaScript/TypeScript runtime) ───────────────────────────────────────
+if ! command -v bun &>/dev/null; then
+  echo "[2] Installing Bun..."
+  curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash >/dev/null 2>&1
+  # Ensure bun is in PATH for subsequent steps
+  export PATH="/usr/local/bin:$PATH"
 else
-  echo "[2] Node.js $(node --version) already installed"
+  echo "[2] Bun $(bun --version) already installed"
 fi
 
 # ── System packages ───────────────────────────────────────────────────────────
@@ -117,7 +109,7 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "${USER_HOME}/.config"
 echo "[7] Downloading client from ${SERVER_URL}..."
 mkdir -p "$INSTALL_DIR"
 curl -fsSL --max-time 120 "${SERVER_URL}/client.tar.gz" | tar -xz -C "$INSTALL_DIR"
-cd "$INSTALL_DIR" && npm install --production --silent 2>/dev/null
+cd "$INSTALL_DIR" && bun install --production 2>/dev/null
 # Ensure service user owns the install dir so check-update.sh can write to it
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
 
@@ -293,7 +285,7 @@ Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/${SERVICE_UID}
 Environment=PULSE_SERVER=unix:/run/user/${SERVICE_UID}/pulse/native
 ExecStartPre=/bin/bash ${INSTALL_DIR}/check-update.sh
-ExecStart=/usr/bin/node ${INSTALL_DIR}/src/daemon.js
+ExecStart=/usr/local/bin/bun run ${INSTALL_DIR}/src/daemon.ts
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

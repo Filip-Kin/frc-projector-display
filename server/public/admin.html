@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Display Admin</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0d0d; color: #f0f0f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+
+  /* ── Login ── */
+  #login-screen {
+    display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px;
+  }
+  .login-card {
+    background: #1c1c1c; border-radius: 16px; padding: 32px 28px; width: 100%; max-width: 360px;
+  }
+  .login-card h1 { font-size: 1.4rem; color: #4af; margin-bottom: 24px; }
+  input[type=text], input[type=password] {
+    width: 100%; background: #252525; border: 1px solid #333; border-radius: 8px;
+    color: #f0f0f0; padding: 12px 14px; font-size: 1rem; outline: none; margin-top: 6px; display: block;
+  }
+  input:focus { border-color: #4af; }
+  label { font-size: 0.8rem; color: #888; display: block; margin-top: 14px; }
+  .login-card button { width: 100%; margin-top: 20px; }
+  .error-msg { color: #f66; font-size: 0.85rem; margin-top: 10px; min-height: 1.2em; }
+
+  /* ── App shell ── */
+  #app { display: none; flex-direction: column; min-height: 100vh; }
+  .topbar {
+    background: #1c1c1c; padding: 12px 16px; display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid #222; position: sticky; top: 0; z-index: 10;
+  }
+  .topbar h1 { font-size: 1rem; font-weight: 600; color: #4af; flex: 1; }
+  .topbar .username { font-size: 0.8rem; color: #666; }
+  .topbar button.sm { padding: 6px 12px; font-size: 0.8rem; }
+
+  .content { padding: 16px; flex: 1; }
+  .section-title {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: #555; margin: 24px 0 10px;
+  }
+  .section-title:first-child { margin-top: 0; }
+
+  /* ── Device cards ── */
+  .device-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 420px) { .device-grid { grid-template-columns: 1fr; } }
+  @media (min-width: 700px) { .device-grid { grid-template-columns: repeat(3, 1fr); } }
+  @media (min-width: 1000px) { .device-grid { grid-template-columns: repeat(4, 1fr); } }
+
+  .device-card {
+    background: #1c1c1c; border-radius: 12px; padding: 14px; border: 1px solid #2a2a2a;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .card-header { display: flex; align-items: center; gap: 8px; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: #f44; }
+  .status-dot.online { background: #4f4; }
+  .pin { font-size: 1.3rem; font-weight: 800; letter-spacing: 0.15em; color: #4af; font-family: monospace; }
+  .badge {
+    display: inline-block; font-size: 0.7rem; padding: 2px 6px; border-radius: 4px;
+    background: #252525; color: #888; border: 1px solid #333;
+  }
+  .badge.new { background: #0d2010; color: #4f4; border-color: #4f44; }
+  .meta { font-size: 0.78rem; color: #666; }
+  .inet { font-size: 0.78rem; }
+  .inet.ok { color: #4f4; }
+  .inet.no { color: #f66; }
+  .card-actions { display: flex; gap: 6px; margin-top: 4px; }
+  .card-actions button { flex: 1; padding: 8px; font-size: 0.8rem; }
+
+  /* ── Log panel ── */
+  .log-panel {
+    margin-top: 8px; background: #111; border-radius: 8px; padding: 10px;
+    max-height: 220px; overflow-y: auto; display: none; font-size: 0.75rem;
+  }
+  .log-panel.open { display: block; }
+  .log-entry { padding: 2px 0; line-height: 1.4; border-bottom: 1px solid #1a1a1a; }
+  .log-entry:last-child { border-bottom: none; }
+  .log-ts { color: #444; margin-right: 6px; }
+  .log-level { margin-right: 6px; font-weight: 600; }
+  .log-level.info { color: #4af; }
+  .log-level.warn { color: #fa0; }
+  .log-level.error { color: #f44; }
+  .log-msg { color: #bbb; word-break: break-all; }
+
+  /* ── Users ── */
+  .user-list { display: flex; flex-direction: column; gap: 6px; }
+  .user-row {
+    background: #1c1c1c; border-radius: 8px; padding: 10px 14px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .user-row .username-text { flex: 1; font-size: 0.95rem; }
+  .user-row .created { font-size: 0.75rem; color: #555; }
+
+  /* ── Add user modal ── */
+  .modal-backdrop {
+    display: none; position: fixed; inset: 0; background: #000a; z-index: 50;
+    align-items: center; justify-content: center; padding: 16px;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: #1c1c1c; border-radius: 16px; padding: 24px; width: 100%; max-width: 340px;
+  }
+  .modal h2 { font-size: 1rem; margin-bottom: 16px; }
+
+  /* ── Buttons ── */
+  button {
+    background: #4af; color: #000; border: none; border-radius: 8px;
+    padding: 10px 16px; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+  }
+  button:active { opacity: 0.8; }
+  button.secondary { background: #252525; color: #ccc; }
+  button.danger { background: #2a0a0a; color: #f66; border: 1px solid #f662; }
+  .no-devices { color: #444; font-size: 0.9rem; text-align: center; padding: 32px 0; }
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1>Display Admin</h1>
+    <label>Username</label>
+    <input type="text" id="login-user" autocomplete="username" autocapitalize="none">
+    <label>Password</label>
+    <input type="password" id="login-pass" autocomplete="current-password">
+    <button onclick="doLogin()">Sign in</button>
+    <div class="error-msg" id="login-error"></div>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <div class="topbar">
+    <h1>Display Admin</h1>
+    <span class="username" id="topbar-user"></span>
+    <button class="sm secondary" onclick="logout()">Sign out</button>
+  </div>
+  <div class="content">
+    <div class="section-title">Connected Devices</div>
+    <div class="device-grid" id="device-grid">
+      <div class="no-devices" style="grid-column:1/-1">No devices connected</div>
+    </div>
+
+    <div class="section-title">Admin Users <button class="sm" style="margin-left:8px" onclick="openAddUser()">+ Add</button></div>
+    <div class="user-list" id="user-list"></div>
+  </div>
+</div>
+
+<!-- Add user modal -->
+<div class="modal-backdrop" id="add-user-modal">
+  <div class="modal">
+    <h2>Add Admin User</h2>
+    <label>Username</label>
+    <input type="text" id="new-username" autocapitalize="none" autocomplete="off">
+    <label style="margin-top:10px">Password</label>
+    <input type="password" id="new-password" autocomplete="new-password">
+    <div class="error-msg" id="add-user-error"></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button onclick="closeAddUser()" class="secondary" style="flex:1">Cancel</button>
+      <button onclick="submitAddUser()" style="flex:1">Add User</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let token = localStorage.getItem('adminToken');
+let tokenUser = localStorage.getItem('adminUser') || '';
+let pollTimer = null;
+let openLogPin = null;
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+async function doLogin() {
+  const username = document.getElementById('login-user').value.trim();
+  const password = document.getElementById('login-pass').value;
+  if (!username || !password) { setLoginError('Enter username and password'); return; }
+  try {
+    const r = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const d = await r.json();
+    if (!r.ok) { setLoginError(d.error || 'Login failed'); return; }
+    token = d.token; tokenUser = username;
+    localStorage.setItem('adminToken', token);
+    localStorage.setItem('adminUser', username);
+    showApp();
+  } catch { setLoginError('Network error'); }
+}
+
+function setLoginError(msg) {
+  document.getElementById('login-error').textContent = msg;
+}
+
+function logout() {
+  localStorage.removeItem('adminToken');
+  localStorage.removeItem('adminUser');
+  token = null; tokenUser = '';
+  clearInterval(pollTimer);
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+}
+
+function showApp() {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  document.getElementById('topbar-user').textContent = tokenUser;
+  refresh();
+  pollTimer = setInterval(refresh, 5000);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    ...opts,
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  });
+  if (r.status === 401) { logout(); return null; }
+  return r.json();
+}
+
+// ── Devices ───────────────────────────────────────────────────────────────────
+
+async function refresh() {
+  const [devices, users] = await Promise.all([
+    api('/api/admin/devices'),
+    api('/api/admin/users'),
+  ]);
+  if (devices) renderDevices(devices);
+  if (users) renderUsers(users);
+}
+
+function relTime(ts) {
+  const d = Date.now() - ts;
+  if (d < 10000) return 'just now';
+  if (d < 60000) return `${Math.floor(d/1000)}s ago`;
+  if (d < 3600000) return `${Math.floor(d/60000)}m ago`;
+  return `${Math.floor(d/3600000)}h ago`;
+}
+
+function renderDevices(devices) {
+  const grid = document.getElementById('device-grid');
+  if (!devices.length) {
+    grid.innerHTML = '<div class="no-devices" style="grid-column:1/-1">No devices connected</div>';
+    return;
+  }
+  grid.innerHTML = devices.map(d => {
+    const logOpen = openLogPin === d.pin ? 'open' : '';
+    const inet = d.hasInternet === true ? '<span class="inet ok">✓ Internet</span>'
+                : d.hasInternet === false ? '<span class="inet no">✗ No internet</span>'
+                : '<span class="inet" style="color:#555">— internet unknown</span>';
+    return `
+    <div class="device-card" id="card-${d.pin}">
+      <div class="card-header">
+        <div class="status-dot online"></div>
+        <span class="pin">${d.pin}</span>
+        <span class="badge">${d.version}</span>
+      </div>
+      ${inet}
+      <div class="meta">Last seen ${relTime(d.lastSeen)}</div>
+      <div class="card-actions">
+        <button onclick="openControl('${d.pin}')">Control</button>
+        <button class="secondary" onclick="toggleLogs('${d.pin}')">Logs</button>
+      </div>
+      <div class="log-panel ${logOpen}" id="logs-${d.pin}">
+        <div style="color:#444;font-size:0.8rem">Loading logs…</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  if (openLogPin) loadLogs(openLogPin);
+}
+
+function openControl(pin) {
+  window.open(`/control?pin=${pin}`, '_blank');
+}
+
+async function toggleLogs(pin) {
+  const panel = document.getElementById(`logs-${pin}`);
+  if (!panel) return;
+  const isOpen = panel.classList.contains('open');
+  panel.classList.toggle('open', !isOpen);
+  openLogPin = isOpen ? null : pin;
+  if (!isOpen) loadLogs(pin);
+}
+
+async function loadLogs(pin) {
+  const panel = document.getElementById(`logs-${pin}`);
+  if (!panel?.classList.contains('open')) return;
+  const logs = await api(`/api/admin/devices/${pin}/logs`);
+  if (!logs) return;
+  if (!logs.length) { panel.innerHTML = '<div style="color:#444;font-size:0.8rem">No logs yet</div>'; return; }
+  panel.innerHTML = logs.slice(-80).map(l => {
+    const t = new Date(l.ts).toLocaleTimeString();
+    return `<div class="log-entry"><span class="log-ts">${t}</span><span class="log-level ${l.level}">${l.level}</span><span class="log-msg">${esc(l.msg)}</span></div>`;
+  }).join('');
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Users ─────────────────────────────────────────────────────────────────────
+
+function renderUsers(users) {
+  const list = document.getElementById('user-list');
+  list.innerHTML = users.map(u => `
+    <div class="user-row">
+      <span class="username-text">${esc(u.username)}</span>
+      <span class="created">${new Date(u.created_at * 1000).toLocaleDateString()}</span>
+      ${users.length > 1 ? `<button class="danger sm" onclick="deleteUser(${u.id}, '${esc(u.username)}')" style="padding:6px 10px;font-size:0.75rem">Delete</button>` : ''}
+    </div>`).join('');
+}
+
+async function deleteUser(id, username) {
+  if (!confirm(`Delete user "${username}"?`)) return;
+  await api(`/api/admin/users/${id}`, { method: 'DELETE' });
+  refresh();
+}
+
+function openAddUser() {
+  document.getElementById('new-username').value = '';
+  document.getElementById('new-password').value = '';
+  document.getElementById('add-user-error').textContent = '';
+  document.getElementById('add-user-modal').classList.add('open');
+}
+
+function closeAddUser() {
+  document.getElementById('add-user-modal').classList.remove('open');
+}
+
+async function submitAddUser() {
+  const username = document.getElementById('new-username').value.trim();
+  const password = document.getElementById('new-password').value;
+  if (!username || !password) { document.getElementById('add-user-error').textContent = 'Fill both fields'; return; }
+  const r = await api('/api/admin/users', { method: 'POST', body: JSON.stringify({ username, password }) });
+  if (r?.error) { document.getElementById('add-user-error').textContent = r.error; return; }
+  closeAddUser();
+  refresh();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    if (document.getElementById('login-screen').style.display !== 'none') doLogin();
+  }
+  if (e.key === 'Escape') closeAddUser();
+});
+
+if (token) {
+  showApp();
+} else {
+  document.getElementById('login-screen').style.display = 'flex';
+}
+</script>
+</body>
+</html>

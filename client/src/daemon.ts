@@ -1,0 +1,154 @@
+import { WebSocket } from 'ws';
+import { execFile } from 'child_process';
+import { state } from './state.js';
+import { cdpNavigate } from './cdp.js';
+import { setHome, setChromium, setNdi, setVnc, startX11vncDaemon, setPin } from './modes.js';
+import { getAudioSinks, getAudioState } from './audio.js';
+import { getNdiSources } from './ndi.js';
+import { hasDefaultRoute } from './wifi.js';
+import { localServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
+import { getNdiSources } from './ndi.js';
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const VERSION      = (await import('../package.json')).version;
+const SERVER_BASE  = process.env.SERVER_URL ?? 'https://display.filipkin.com';
+const SERVER_URL   = SERVER_BASE.replace(/^https?:\/\//, m => m === 'https://' ? 'wss://' : 'ws://');
+const INSTALL_DIR  = process.env.INSTALL_DIR ?? '/opt/frc-projector-display/client';
+
+const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const PIN   = Array.from({ length: 6 }, () => CHARS[Math.floor(Math.random() * CHARS.length)]).join('');
+const AP_SSID    = `FRC-Display-${PIN}`;
+const CONTROL_URL = `${SERVER_BASE}/control?pin=${PIN}`;
+
+setPin(PIN);
+initServer(PIN, AP_SSID, CONTROL_URL, VERSION, SERVER_BASE);
+
+console.log(`[daemon] v${VERSION} PIN: ${PIN}`);
+console.log(`[daemon] Control URL: ${CONTROL_URL}`);
+
+// ── Logging helper ────────────────────────────────────────────────────────────
+export function log(level: 'info' | 'warn' | 'error', msg: string) {
+  const tag = level.toUpperCase().padEnd(5);
+  process.stdout.write(`[${tag}] ${new Date().toISOString()} ${msg}\n`);
+  if (state.serverWs?.readyState === WebSocket.OPEN) {
+    state.serverWs.send(JSON.stringify({ type: 'log', level, msg, ts: Date.now() }));
+  }
+}
+
+// ── Server WebSocket ──────────────────────────────────────────────────────────
+let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+let ndiPollInterval:   ReturnType<typeof setInterval> | null = null;
+
+function connectToServer() {
+  const wsUrl = `${SERVER_URL}/ws/device`;
+  log('info', `[ws] connecting to ${wsUrl}`);
+  state.serverWs = new WebSocket(wsUrl);
+
+  state.serverWs.on('open', async () => {
+    state.wsEverConnected = true;
+    clearTimeout(apCheckTimer);
+    clearTimeout(state.networkCheckTimer!);
+    state.networkCheckTimer = null;
+    log('info', '[ws] connected to server');
+    state.reconnectDelay = 2000;
+
+    if (state.apMode && !state.postConnectInProgress) {
+      const { stopAp } = await import('./wifi.js');
+      if (state.apIface) await stopAp(state.apIface).catch(() => {});
+      state.apMode = false; state.apIface = null;
+      await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+    }
+
+    state.serverWs!.send(JSON.stringify({ type: 'register', pin: PIN }));
+    heartbeatInterval = setInterval(() => {
+      if (state.serverWs?.readyState === WebSocket.OPEN) {
+        state.serverWs.send(JSON.stringify({ type: 'heartbeat', version: VERSION }));
+      }
+    }, 30000);
+    ndiPollInterval = setInterval(async () => {
+      const sources = await getNdiSources();
+      if (state.serverWs?.readyState === WebSocket.OPEN)
+        state.serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
+    }, 20000);
+
+    setTimeout(async () => {
+      try {
+        const sinks = await getAudioSinks();
+        const astState = await getAudioState();
+        if (state.serverWs?.readyState === WebSocket.OPEN)
+          state.serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state: astState }));
+      } catch {}
+    }, 5000);
+  });
+
+  state.serverWs.on('message', async (data) => {
+    let msg: any;
+    try { msg = JSON.parse(data.toString()); } catch { return; }
+    log('info', `[ws] command: ${msg.type}`);
+
+    switch (msg.type) {
+      case 'set_mode':
+        state.currentMode = msg.mode;
+        if (msg.mode === 'home')                         await setHome();
+        else if (msg.mode === 'chromium' && msg.url)    await setChromium(msg.url);
+        else if (msg.mode === 'ndi'      && msg.source) setNdi(msg.source);
+        else if (msg.mode === 'vnc')                    setVnc(state.serverWs!);
+        break;
+      case 'refresh_ndi': {
+        const sources = await getNdiSources();
+        if (state.serverWs?.readyState === WebSocket.OPEN)
+          state.serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
+        break;
+      }
+      case 'start_vnc_bridge':
+        setVnc(state.serverWs!);
+        break;
+      case 'set_audio_output':
+        if (msg.sink) execFile('pactl', ['set-default-sink', msg.sink], { env: process.env }, () => {});
+        break;
+      case 'set_volume': {
+        const vol = Math.max(0, Math.min(100, parseInt(msg.volume) || 0));
+        execFile('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${vol}%`], { env: process.env }, () => {});
+        break;
+      }
+      case 'set_mute':
+        execFile('pactl', ['set-sink-mute', '@DEFAULT_SINK@', msg.muted ? '1' : '0'], { env: process.env }, () => {});
+        break;
+    }
+  });
+
+  state.serverWs.on('close', () => {
+    log('warn', `[ws] disconnected — reconnecting in ${state.reconnectDelay}ms`);
+    if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
+    if (ndiPollInterval)   { clearInterval(ndiPollInterval);   ndiPollInterval   = null; }
+    setTimeout(connectToServer, state.reconnectDelay);
+    state.reconnectDelay = Math.min(state.reconnectDelay * 1.5, 30000);
+
+    if (state.wsEverConnected && !state.networkCheckTimer) {
+      state.networkCheckTimer = setTimeout(async () => {
+        state.networkCheckTimer = null;
+        if (state.apMode || state.serverWs?.readyState === WebSocket.OPEN) return;
+        if (!(await hasDefaultRoute())) await enterApMode();
+      }, 30000);
+    }
+  });
+
+  state.serverWs.on('error', (err: Error) => log('error', `[ws] ${err.message}`));
+}
+
+
+// ── Start ─────────────────────────────────────────────────────────────────────
+startX11vncDaemon();
+
+localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
+  log('info', `[daemon] local server on port ${LOCAL_PORT}`);
+  setTimeout(() => cdpNavigate(`http://localhost:${LOCAL_PORT}/`), 3000);
+});
+
+const apCheckTimer = setTimeout(async () => {
+  if (state.wsEverConnected) return;
+  if (await hasDefaultRoute()) return;
+  await enterApMode();
+}, 20000);
+
+connectToServer();

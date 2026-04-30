@@ -24,7 +24,7 @@ echo "[update] ${LOCAL} → ${REMOTE}"
 TMP=$(mktemp -d)
 if curl -sf --max-time 120 "${SERVER_URL}/client.tar.gz" | tar -xz -C "$TMP"; then
   cp -a "$TMP/." "${INSTALL_DIR}/"
-  cd "${INSTALL_DIR}" && npm install --production --silent 2>/dev/null
+  cd "${INSTALL_DIR}" && bun install --production 2>/dev/null
   echo "[update] done — v${REMOTE}"
 else
   echo "[update] download failed — keeping v${LOCAL}"
