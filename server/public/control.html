@@ -213,6 +213,7 @@
 <div class="status-bar">
   <div class="dot" id="status-dot"></div>
   <span id="status-text" style="flex:1">Not connected</span>
+  <button id="vnc-quick-btn" class="secondary" onclick="openVnc()" style="display:none;padding:7px 12px;font-size:0.82rem">🖥 VNC</button>
 </div>
 
 <div id="control-section">
@@ -235,9 +236,6 @@
     </div>
     <div class="mode-btn" id="mode-url" onclick="selectMode('url')">
       <span class="icon">🌐</span>Custom URL
-    </div>
-    <div class="mode-btn" id="mode-fta" onclick="selectMode('fta')" style="opacity:0.4;cursor:not-allowed">
-      <span class="icon">🤖</span>FTA Buddy<br><small>(soon)</small>
     </div>
   </div>
 
@@ -384,11 +382,13 @@ function connect() {
       saveRecentPin(pin);
       setStatus('online', `Connected · PIN ${pin}`);
       document.getElementById('control-section').style.display = 'block';
+      document.getElementById('vnc-quick-btn').style.display = '';
       if (msg.ndiSources) updateNdiSources(msg.ndiSources);
       if (msg.audioSinks) updateAudioSinks(msg.audioSinks, msg.audioState);
     } else if (msg.type === 'device_disconnected') {
       setStatus('offline', `Waiting for device (PIN: ${pin})`);
       document.getElementById('control-section').style.display = 'none';
+      document.getElementById('vnc-quick-btn').style.display = 'none';
     } else if (msg.type === 'ndi_sources') {
       updateNdiSources(msg.sources);
     } else if (msg.type === 'audio_sinks') {
@@ -447,16 +447,9 @@ function applyMode() {
   let msg;
   switch (selectedMode) {
     case 'ndi': {
-      const srt = document.getElementById('srt-url').value.trim();
-      if (srt) {
-        // SRT takes priority if filled in
-        const srtUrl = srt.startsWith('srt://') ? srt : 'srt://' + srt;
-        msg = { type: 'set_mode', mode: 'ndi', source: srtUrl };
-      } else {
-        const src = document.getElementById('ndi-source-select').value;
-        if (!src) { toast('Select an NDI source or enter an SRT URL'); return; }
-        msg = { type: 'set_mode', mode: 'ndi', source: src };
-      }
+      const src = document.getElementById('ndi-source-select').value;
+      if (!src) { toast('Select a video source'); return; }
+      msg = { type: 'set_mode', mode: 'ndi', source: src };
       break;
     }
     case 'fim': {
@@ -568,6 +561,12 @@ function toggleMute() {
   isMuted = !isMuted;
   document.getElementById('mute-btn').textContent = isMuted ? '🔇' : '🔊';
   sendMsg({ type: 'set_mute', muted: isMuted });
+}
+
+function openVnc() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
+  sendMsg({ type: 'start_vnc_bridge' });
+  window.open(`/vnc/${currentPin}`, '_blank');
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────

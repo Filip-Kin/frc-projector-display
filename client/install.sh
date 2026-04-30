@@ -253,18 +253,21 @@ def avahi_browse(svc):
             if pm and addr: results.append((current_name, addr, pm.group(1))); current_name = None
     return results
 
-ndi, seen = [], set()
-for name, _a, _p in avahi_browse('_ndi._tcp'):
-    if name not in seen: seen.add(name); ndi.append(name)
+sources = []
+seen = set()
 
-omt, seen = [], set()
+for name, _a, _p in avahi_browse('_ndi._tcp'):
+    if name not in seen:
+        seen.add(name)
+        sources.append({'label': f'NDI: {name}', 'value': name})
+
 for name, addr, port in avahi_browse('_omt._tcp'):
     key = f'{addr}:{port}'
     if key not in seen:
         seen.add(key)
-        omt.append({'label': f'OMT: {name}', 'value': f'omt://{addr}:{port}'})
+        sources.append({'label': f'OMT: {name}', 'value': f'omt://{addr}:{port}'})
 
-print(json.dumps(ndi + omt))
+print(json.dumps(sources))
 PYSCRIPT
 chmod +x /usr/local/bin/ndi-sources.py
 
