@@ -212,7 +212,8 @@
 
 <div class="status-bar">
   <div class="dot" id="status-dot"></div>
-  <span id="status-text">Not connected</span>
+  <span id="status-text" style="flex:1">Not connected</span>
+  <button id="vnc-quick-btn" class="secondary" onclick="openVnc()" style="display:none;padding:7px 12px;font-size:0.82rem">🖥 VNC</button>
 </div>
 
 <div id="control-section">
@@ -236,7 +237,7 @@
     <div class="mode-btn" id="mode-url" onclick="selectMode('url')">
       <span class="icon">🌐</span>Custom URL
     </div>
-    <div class="mode-btn" id="mode-vnc" onclick="selectMode('vnc')">
+    <div class="mode-btn" id="mode-vnc" onclick="openVnc()">
       <span class="icon">🖥️</span>Web VNC
     </div>
     <div class="mode-btn" id="mode-fta" onclick="selectMode('fta')" style="opacity:0.4;cursor:not-allowed">
@@ -286,12 +287,6 @@
     <label>URL</label>
     <input type="url" id="custom-url" placeholder="https://...">
     <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
-  </div>
-
-  <!-- VNC config -->
-  <div class="mode-config" id="config-vnc">
-    <p style="color:#888;font-size:0.85rem;margin-bottom:12px">Opens a web VNC session to the display in a new tab.</p>
-    <div class="apply-row"><button onclick="applyMode()">Open VNC</button></div>
   </div>
 
   <!-- Audio controls -->
@@ -393,11 +388,13 @@ function connect() {
       saveRecentPin(pin);
       setStatus('online', `Connected · PIN ${pin}`);
       document.getElementById('control-section').style.display = 'block';
+      document.getElementById('vnc-quick-btn').style.display = '';
       if (msg.ndiSources) updateNdiSources(msg.ndiSources);
       if (msg.audioSinks) updateAudioSinks(msg.audioSinks, msg.audioState);
     } else if (msg.type === 'device_disconnected') {
       setStatus('offline', `Waiting for device (PIN: ${pin})`);
       document.getElementById('control-section').style.display = 'none';
+      document.getElementById('vnc-quick-btn').style.display = 'none';
     } else if (msg.type === 'ndi_sources') {
       updateNdiSources(msg.sources);
     } else if (msg.type === 'audio_sinks') {
@@ -484,14 +481,10 @@ function applyMode() {
       break;
     }
     case 'url': {
-      const u = document.getElementById('custom-url').value.trim();
+      let u = document.getElementById('custom-url').value.trim();
       if (!u) { toast('Enter a URL'); return; }
+      if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
       msg = { type: 'set_mode', mode: 'chromium', url: u };
-      break;
-    }
-    case 'vnc': {
-      window.open(`/vnc/${currentPin}`, '_blank');
-      msg = { type: 'set_mode', mode: 'vnc' };
       break;
     }
     default: toast('Select a mode first'); return;
@@ -515,7 +508,8 @@ function updateNdiSources(sources) {
 // ── YouTube ───────────────────────────────────────────────────────────────────
 
 function extractYouTubeId(val) {
-  const m = val.match(/(?:[?&]v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  // Handles: ?v=, youtu.be/, /live/, /embed/, /shorts/
+  const m = val.match(/(?:[?&]v=|youtu\.be\/|\/(?:live|embed|shorts)\/)([A-Za-z0-9_-]{11})/);
   if (m) return m[1];
   if (/^[A-Za-z0-9_-]{11}$/.test(val)) return val;
   return null;
@@ -568,6 +562,14 @@ function toggleMute() {
   isMuted = !isMuted;
   document.getElementById('mute-btn').textContent = isMuted ? '🔇' : '🔊';
   sendMsg({ type: 'set_mute', muted: isMuted });
+}
+
+// ── VNC (always-on: opens without changing display mode) ──────────────────────
+
+function openVnc() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
+  sendMsg({ type: 'start_vnc_bridge' });
+  window.open(`/vnc/${currentPin}`, '_blank');
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────

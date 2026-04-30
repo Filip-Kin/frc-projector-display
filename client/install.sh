@@ -59,7 +59,8 @@ case $PKG_MGR in
       xorg openbox lightdm lightdm-gtk-greeter \
       chromium x11vnc unclutter \
       ffmpeg curl tar python3 \
-      network-manager dnsmasq iptables >/dev/null ;;
+      network-manager dnsmasq iptables \
+      avahi-utils >/dev/null ;;
   dnf)
     dnf install -y \
       xorg-x11-server-Xorg openbox lightdm lightdm-gtk-greeter \
@@ -187,19 +188,57 @@ ${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin
 SUDOCONF
 chmod 440 /etc/sudoers.d/frc-display
 
-# ── ndi-list-sources stub ─────────────────────────────────────────────────────
-echo "[11] Installing ndi-list-sources stub..."
+# ── NDI source discovery ───────────────────────────────────────────────────────
+echo "[11] Installing NDI tools..."
+
+# ndi-list-sources: uses avahi mDNS (no SDK needed) + falls back to NDI SDK tools
 cat > /usr/local/bin/ndi-list-sources << 'NDISCRIPT'
 #!/bin/bash
+# Try avahi mDNS discovery first (works without NDI SDK)
+if command -v avahi-browse &>/dev/null; then
+  SOURCES=$(timeout 3 avahi-browse -t -r -p _ndi._tcp 2>/dev/null \
+    | awk -F';' '/^=/ {gsub(/"/, "", $5); if ($5 != "") print $5}' \
+    | sort -u)
+  if [ -n "$SOURCES" ]; then
+    python3 -c "import sys,json; lines=[l.strip() for l in sys.stdin if l.strip()]; print(json.dumps(lines))" <<< "$SOURCES"
+    exit 0
+  fi
+fi
+# Fall back to NDI SDK tools if installed
 if command -v ndi-directory-service &>/dev/null; then
   timeout 3 ndi-directory-service list 2>/dev/null \
     | grep -oP '(?<=Source: ).*' \
     | python3 -c "import sys,json; lines=[l.strip() for l in sys.stdin if l.strip()]; print(json.dumps(lines))"
-else
-  echo "[]"
+  exit 0
 fi
+echo "[]"
 NDISCRIPT
 chmod +x /usr/local/bin/ndi-list-sources
+
+# Optional: install NDI SDK for ffplay NDI playback support
+# Usage: NDI_SDK_URL=https://... bash install.sh
+#     or NDI_SDK_PATH=/path/to/ndi-sdk.tar.gz bash install.sh
+# SDK download (free account required): https://ndi.tv/sdk/
+if [ -n "${NDI_SDK_URL:-}" ] || [ -n "${NDI_SDK_PATH:-}" ]; then
+  echo "  [NDI] Installing NDI SDK for playback..."
+  TMP_NDI=$(mktemp -d)
+  if [ -n "${NDI_SDK_PATH:-}" ] && [ -f "$NDI_SDK_PATH" ]; then
+    cp "$NDI_SDK_PATH" "$TMP_NDI/ndi.tar.gz"
+  else
+    curl -fsSL "$NDI_SDK_URL" -o "$TMP_NDI/ndi.tar.gz"
+  fi
+  tar -xzf "$TMP_NDI/ndi.tar.gz" -C "$TMP_NDI" 2>/dev/null || true
+  INSTALLER=$(find "$TMP_NDI" -name "Install_NDI_SDK*.sh" 2>/dev/null | head -1)
+  if [ -n "$INSTALLER" ]; then
+    chmod +x "$INSTALLER"
+    ACCEPT=yes bash "$INSTALLER" 2>/dev/null || true
+    echo "  [NDI] SDK installed — ffplay NDI support requires recompiling ffmpeg with --enable-libndi_newtek"
+  fi
+  rm -rf "$TMP_NDI"
+else
+  echo "  [NDI] Skipping SDK (set NDI_SDK_URL=<url> or NDI_SDK_PATH=<path> to install)"
+  echo "        NDI source discovery via avahi works without the SDK"
+fi
 
 # ── Systemd service ────────────────────────────────────────────────────────────
 echo "[12] Installing systemd service..."
@@ -237,6 +276,15 @@ systemctl enable display-daemon.service
 # ── Graphical target ───────────────────────────────────────────────────────────
 echo "[13] Setting graphical boot target..."
 systemctl set-default graphical.target
+
+# ── Power button → immediate shutdown ─────────────────────────────────────────
+echo "[14] Configuring power button..."
+mkdir -p /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/power-button.conf << 'EOF'
+[Login]
+HandlePowerKey=poweroff
+EOF
+systemctl restart systemd-logind 2>/dev/null || true
 
 echo ""
 echo "=== Install complete! ==="

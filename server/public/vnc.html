@@ -11,21 +11,22 @@
     position: fixed;
     top: 10px; left: 50%;
     transform: translateX(-50%);
-    background: #0008;
+    background: #0009;
     color: #fff;
-    padding: 6px 14px;
+    padding: 6px 16px;
     border-radius: 20px;
     font-family: sans-serif;
     font-size: 0.85rem;
     z-index: 10;
-    transition: opacity 1s;
+    transition: opacity 0.8s;
+    white-space: nowrap;
   }
   #status.hidden { opacity: 0; pointer-events: none; }
   #screen { width: 100%; height: 100%; }
 </style>
 </head>
 <body>
-<div id="status">Connecting to VNC…</div>
+<div id="status">Connecting to relay server…</div>
 <div id="screen"></div>
 <script type="module">
 import RFB from '/novnc/core/rfb.js';
@@ -36,32 +37,60 @@ const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsUrl = `${proto}//${location.host}/ws/vnc-client?pin=${pin}`;
 
 const statusEl = document.getElementById('status');
+const screenEl = document.getElementById('screen');
 
-let rfb;
-try {
-  rfb = new RFB(document.getElementById('screen'), wsUrl, {
-    credentials: { password: '' }
-  });
+let rfb = null;
+let reconnectTimer = null;
+let stageTimer = null;
 
-  rfb.addEventListener('connect', () => {
-    statusEl.textContent = 'Connected';
-    setTimeout(() => statusEl.classList.add('hidden'), 2000);
-    rfb.scaleViewport = true;
-    rfb.resizeSession = false;
-  });
-
-  rfb.addEventListener('disconnect', (e) => {
-    statusEl.classList.remove('hidden');
-    statusEl.textContent = e.detail.clean ? 'Disconnected' : 'Connection lost';
-  });
-
-  rfb.addEventListener('credentialsrequired', () => {
-    rfb.sendCredentials({ password: '' });
-  });
-
-} catch (err) {
-  statusEl.textContent = `Error: ${err.message}`;
+function setStatus(text) {
+  statusEl.textContent = text;
+  statusEl.classList.remove('hidden');
 }
+
+function connect() {
+  clearTimeout(reconnectTimer);
+  clearTimeout(stageTimer);
+  setStatus('Connecting to relay server…');
+
+  try {
+    rfb = new RFB(screenEl, wsUrl, { credentials: { password: '' } });
+
+    // Stage 2: relay connected but VNC session not yet established
+    stageTimer = setTimeout(() => setStatus('Relay connected — waiting for display device…'), 4000);
+
+    rfb.addEventListener('connect', () => {
+      clearTimeout(stageTimer);
+      setStatus('Connected');
+      setTimeout(() => statusEl.classList.add('hidden'), 2000);
+      rfb.scaleViewport = true;
+      rfb.resizeSession = false;
+    });
+
+    rfb.addEventListener('disconnect', (e) => {
+      clearTimeout(stageTimer);
+      const msg = e.detail.clean ? 'Disconnected' : 'Connection lost';
+      setStatus(`${msg} — reconnecting in 3s…`);
+      rfb = null;
+      reconnectTimer = setTimeout(connect, 3000);
+    });
+
+    rfb.addEventListener('credentialsrequired', () => rfb.sendCredentials({ password: '' }));
+
+    rfb.addEventListener('securityfailure', () => {
+      clearTimeout(stageTimer);
+      setStatus('VNC security failure — retrying in 5s…');
+      rfb = null;
+      reconnectTimer = setTimeout(connect, 5000);
+    });
+
+  } catch (err) {
+    setStatus(`Error: ${err.message} — retrying in 5s…`);
+    reconnectTimer = setTimeout(connect, 5000);
+  }
+}
+
+connect();
 </script>
 </body>
 </html>

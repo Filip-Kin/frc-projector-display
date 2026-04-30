@@ -33,6 +33,7 @@ let vncBridgeWs = null;
 let apMode = false;
 let apIface = null;
 let postConnectInProgress = false;
+let networkCheckTimer = null;
 
 // ── Local web server ──────────────────────────────────────────────────────────
 
@@ -228,8 +229,8 @@ function stopNdi() {
   if (ndiProcess) { ndiProcess.kill('SIGTERM'); ndiProcess = null; }
 }
 
+// x11vnc is always-on — stopVnc only disconnects the relay bridge
 function stopVnc() {
-  if (x11vncProcess) { x11vncProcess.kill('SIGTERM'); x11vncProcess = null; }
   if (vncBridgeSocket) { vncBridgeSocket.destroy(); vncBridgeSocket = null; }
   if (vncBridgeWs) { vncBridgeWs.close(); vncBridgeWs = null; }
 }
@@ -256,12 +257,21 @@ function setNdi(source) {
 }
 
 function setVnc(sWs) {
-  stopNdi(); stopVnc();
+  // x11vnc is always-on — just connect the relay bridge (don't stop current mode)
+  if (vncBridgeWs?.readyState === WebSocket.OPEN) return;
+  connectVncBridge(sWs);
+  console.log('[vnc] relay bridge started');
+}
+
+function startX11vncDaemon() {
   const display = process.env.DISPLAY || ':0';
   x11vncProcess = spawn('x11vnc', ['-display', display, '-forever', '-nopw', '-quiet', '-rfbport', String(VNC_PORT)], { detached: false });
-  x11vncProcess.on('exit', (code) => { console.log(`[vnc] x11vnc exited (${code})`); x11vncProcess = null; });
-  setTimeout(() => connectVncBridge(sWs), 1500);
-  console.log('[vnc] started x11vnc');
+  x11vncProcess.on('exit', (code) => {
+    console.log(`[vnc] x11vnc exited (${code}) — restarting in 5s`);
+    x11vncProcess = null;
+    setTimeout(startX11vncDaemon, 5000);
+  });
+  console.log('[vnc] x11vnc started (always-on)');
 }
 
 function connectVncBridge(sWs) {
@@ -335,17 +345,31 @@ function connectToServer() {
   serverWs.on('open', async () => {
     wsEverConnected = true;
     clearTimeout(apCheckTimer);
+    clearTimeout(networkCheckTimer);
+    networkCheckTimer = null;
     console.log('[ws] connected to server');
     reconnectDelay = 2000;
+
+    // If we were in AP mode and WiFi came back on its own, stop AP and go home
+    if (apMode && !postConnectInProgress) {
+      if (apIface) await wifi.stopAp(apIface).catch(() => {});
+      apMode = false; apIface = null;
+      await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+    }
+
     serverWs.send(JSON.stringify({ type: 'register', pin: PIN }));
     startHeartbeat();
     startNdiPolling();
-    try {
-      const sinks = await getAudioSinks();
-      const state = await getAudioState();
-      if (serverWs?.readyState === WebSocket.OPEN)
-        serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state }));
-    } catch {}
+
+    // Delay audio detection — PipeWire may not be ready immediately on boot
+    setTimeout(async () => {
+      try {
+        const sinks = await getAudioSinks();
+        const state = await getAudioState();
+        if (serverWs?.readyState === WebSocket.OPEN)
+          serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state }));
+      } catch {}
+    }, 5000);
   });
 
   serverWs.on('message', async (data) => {
@@ -368,6 +392,9 @@ function connectToServer() {
       execFile('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${vol}%`], { env: process.env }, () => {});
     } else if (msg.type === 'set_mute') {
       execFile('pactl', ['set-sink-mute', '@DEFAULT_SINK@', msg.muted ? '1' : '0'], { env: process.env }, () => {});
+    } else if (msg.type === 'start_vnc_bridge') {
+      // Open VNC relay without changing current display mode
+      if (vncBridgeWs?.readyState !== WebSocket.OPEN) connectVncBridge(serverWs);
     }
   });
 
@@ -376,6 +403,14 @@ function connectToServer() {
     stopHeartbeat(); stopNdiPolling();
     setTimeout(connectToServer, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 1.5, 30000);
+    // After 30s of no connection with no default route → AP provisioning
+    if (wsEverConnected && !networkCheckTimer) {
+      networkCheckTimer = setTimeout(async () => {
+        networkCheckTimer = null;
+        if (apMode || serverWs?.readyState === WebSocket.OPEN) return;
+        if (!(await wifi.hasDefaultRoute())) await enterApMode();
+      }, 30000);
+    }
   });
 
   serverWs.on('error', err => console.error('[ws] error:', err.message));
@@ -584,6 +619,9 @@ async function pollInternet() {
 }
 
 // ── AP trigger (20s after start, if no WS and no default route) ───────────────
+
+// Start x11vnc immediately so VNC is always accessible regardless of display mode
+startX11vncDaemon();
 
 const apCheckTimer = setTimeout(async () => {
   if (wsEverConnected) return;
