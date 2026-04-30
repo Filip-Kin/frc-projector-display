@@ -249,11 +249,11 @@ function setNdi(source) {
   stopNdi(); stopVnc();
   cdpNavigate('about:blank');
   const display = process.env.DISPLAY || ':0';
-  ndiProcess = spawn('ffplay', ['-f', 'libndi_newtek', '-i', source, '-fs', '-an', '-loglevel', 'quiet'], {
+  ndiProcess = spawn('ndi-play-wrapper', [source], {
     env: { ...process.env, DISPLAY: display }, detached: false
   });
-  ndiProcess.on('exit', (code) => { console.log(`[ndi] ffplay exited (${code})`); ndiProcess = null; });
-  console.log(`[ndi] started ffplay for: ${source}`);
+  ndiProcess.on('exit', (code) => { console.log(`[ndi] ndi-play exited (${code})`); ndiProcess = null; });
+  console.log(`[ndi] started ndi-play for: ${source}`);
 }
 
 function setVnc(sWs) {

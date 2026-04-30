@@ -215,30 +215,27 @@ echo "[]"
 NDISCRIPT
 chmod +x /usr/local/bin/ndi-list-sources
 
-# Optional: install NDI SDK for ffplay NDI playback support
-# Usage: NDI_SDK_URL=https://... bash install.sh
-#     or NDI_SDK_PATH=/path/to/ndi-sdk.tar.gz bash install.sh
-# SDK download (free account required): https://ndi.tv/sdk/
-if [ -n "${NDI_SDK_URL:-}" ] || [ -n "${NDI_SDK_PATH:-}" ]; then
-  echo "  [NDI] Installing NDI SDK for playback..."
-  TMP_NDI=$(mktemp -d)
-  if [ -n "${NDI_SDK_PATH:-}" ] && [ -f "$NDI_SDK_PATH" ]; then
-    cp "$NDI_SDK_PATH" "$TMP_NDI/ndi.tar.gz"
-  else
-    curl -fsSL "$NDI_SDK_URL" -o "$TMP_NDI/ndi.tar.gz"
-  fi
-  tar -xzf "$TMP_NDI/ndi.tar.gz" -C "$TMP_NDI" 2>/dev/null || true
-  INSTALLER=$(find "$TMP_NDI" -name "Install_NDI_SDK*.sh" 2>/dev/null | head -1)
-  if [ -n "$INSTALLER" ]; then
-    chmod +x "$INSTALLER"
-    ACCEPT=yes bash "$INSTALLER" 2>/dev/null || true
-    echo "  [NDI] SDK installed — ffplay NDI support requires recompiling ffmpeg with --enable-libndi_newtek"
-  fi
-  rm -rf "$TMP_NDI"
+# Install ndi-play binary + libndi.so from GCS (no account needed, fully automated)
+NDI_TOOLS_ARCH="x86_64"
+case "$(uname -m)" in
+  aarch64|arm64) NDI_TOOLS_ARCH="aarch64" ;;
+  armv7*|armhf)  NDI_TOOLS_ARCH="armhf" ;;
+esac
+NDI_TOOLS_URL="https://storage.googleapis.com/frc-display-assets/ndi-tools-linux-${NDI_TOOLS_ARCH}.tar.gz"
+
+echo "  [NDI] Installing ndi-play from ${NDI_TOOLS_URL}..."
+TMP_NDI=$(mktemp -d)
+if curl -fsSL --max-time 60 "$NDI_TOOLS_URL" | tar -xz -C "$TMP_NDI" 2>/dev/null; then
+  install -m 755 "$TMP_NDI/ndi-play"         /usr/local/bin/ndi-play
+  install -m 755 "$TMP_NDI/ndi-play-wrapper" /usr/local/bin/ndi-play-wrapper
+  install -m 644 "$TMP_NDI/libndi.so.6"      /usr/local/lib/libndi.so.6
+  ln -sf /usr/local/lib/libndi.so.6 /usr/local/lib/libndi.so
+  ldconfig
+  echo "  [NDI] ndi-play installed successfully"
 else
-  echo "  [NDI] Skipping SDK (set NDI_SDK_URL=<url> or NDI_SDK_PATH=<path> to install)"
-  echo "        NDI source discovery via avahi works without the SDK"
+  echo "  [NDI] Warning: could not download ndi-play (NDI playback unavailable)"
 fi
+rm -rf "$TMP_NDI"
 
 # ── Systemd service ────────────────────────────────────────────────────────────
 echo "[12] Installing systemd service..."
