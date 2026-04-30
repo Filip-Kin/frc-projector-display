@@ -249,11 +249,19 @@ function setNdi(source) {
   stopNdi(); stopVnc();
   cdpNavigate('about:blank');
   const display = process.env.DISPLAY || ':0';
-  ndiProcess = spawn('ndi-play-wrapper', [source], {
-    env: { ...process.env, DISPLAY: display }, detached: false
-  });
-  ndiProcess.on('exit', (code) => { console.log(`[ndi] ndi-play exited (${code})`); ndiProcess = null; });
-  console.log(`[ndi] started ndi-play for: ${source}`);
+  // Detect SRT URL (open standard, works LAN + WAN) vs NDI source name
+  if (source.startsWith('srt://')) {
+    ndiProcess = spawn('ffplay', [source, '-fs', '-loglevel', 'quiet'], {
+      env: { ...process.env, DISPLAY: display }, detached: false
+    });
+    console.log(`[srt] started ffplay for: ${source}`);
+  } else {
+    ndiProcess = spawn('ndi-play-wrapper', [source], {
+      env: { ...process.env, DISPLAY: display }, detached: false
+    });
+    console.log(`[ndi] started ndi-play for: ${source}`);
+  }
+  ndiProcess.on('exit', (code) => { console.log(`[video] player exited (${code})`); ndiProcess = null; });
 }
 
 function setVnc(sWs) {

@@ -245,14 +245,16 @@
     </div>
   </div>
 
-  <!-- NDI config -->
+  <!-- NDI / SRT config -->
   <div class="mode-config" id="config-ndi">
-    <label>NDI Source</label>
+    <label>NDI Source <span style="color:#555;font-weight:400">(LAN)</span></label>
     <div style="display:flex;gap:8px">
       <select id="ndi-source-select" style="flex:1">
         <option value="">-- refreshing sources… --</option>
       </select>
     </div>
+    <label style="margin-top:10px">SRT Stream URL <span style="color:#555;font-weight:400">(open standard, LAN + WAN)</span></label>
+    <input type="text" id="srt-url" placeholder="srt://192.168.1.x:1234" autocomplete="off">
     <div class="apply-row">
       <button onclick="applyMode()">Apply</button>
     </div>
@@ -453,9 +455,16 @@ function applyMode() {
   let msg;
   switch (selectedMode) {
     case 'ndi': {
-      const src = document.getElementById('ndi-source-select').value;
-      if (!src) { toast('Select an NDI source'); return; }
-      msg = { type: 'set_mode', mode: 'ndi', source: src };
+      const srt = document.getElementById('srt-url').value.trim();
+      if (srt) {
+        // SRT takes priority if filled in
+        const srtUrl = srt.startsWith('srt://') ? srt : 'srt://' + srt;
+        msg = { type: 'set_mode', mode: 'ndi', source: srtUrl };
+      } else {
+        const src = document.getElementById('ndi-source-select').value;
+        if (!src) { toast('Select an NDI source or enter an SRT URL'); return; }
+        msg = { type: 'set_mode', mode: 'ndi', source: src };
+      }
       break;
     }
     case 'fim': {
