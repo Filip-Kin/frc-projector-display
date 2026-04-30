@@ -149,7 +149,6 @@ nmcli con delete "frc-provision" 2>/dev/null || true
 nmcli con add type wifi ifname "$IFACE" con-name "frc-provision" \
   ssid "FRC-Display-${PIN}" \
   802-11-wireless.mode ap \
-  802-11-wireless-security.key-mgmt none \
   ipv4.method shared \
   ipv4.addresses "192.168.4.1/24"
 nmcli con up "frc-provision"

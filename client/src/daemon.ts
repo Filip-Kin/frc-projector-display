@@ -71,8 +71,9 @@ function connectToServer() {
       const { stopAp } = await import('./wifi.js');
       if (state.apIface) await stopAp(state.apIface).catch(() => {});
       state.apMode = false; state.apIface = null;
-      await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
     }
+    // Navigate to home QR page now that we have a connection
+    await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
 
     state.serverWs!.send(JSON.stringify({ type: 'register', pin: PIN }));
     heartbeatInterval = setInterval(() => {
@@ -157,11 +158,22 @@ function connectToServer() {
     state.reconnectDelay = Math.min(state.reconnectDelay * 1.5, 30000);
 
     if (state.wsEverConnected && !state.networkCheckTimer) {
+      // Show connecting screen immediately (unless NDI is playing — don't interrupt)
+      const ndiActive = state.currentMode === 'ndi' && state.ndiProcess !== null;
+      if (!ndiActive && !state.apMode) {
+        cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+      }
+
       state.networkCheckTimer = setTimeout(async () => {
         state.networkCheckTimer = null;
         if (state.apMode || state.serverWs?.readyState === WebSocket.OPEN) return;
-        // WS still not open after 30s of trying → server unreachable → AP mode
-        if (state.serverWs?.readyState !== WebSocket.OPEN) await enterApMode();
+        // Still no connection after 30s — skip AP if NDI stream is still running
+        const ndiStillActive = state.currentMode === 'ndi' && state.ndiProcess !== null;
+        if (ndiStillActive) {
+          log('info', '[ws] connection lost but NDI stream active — not entering AP mode');
+          return;
+        }
+        await enterApMode();
       }, 30000);
     }
   });
@@ -204,8 +216,9 @@ async function runNetworkStartup() {
     }
   }
 
-  // WS connection is the ground truth — if it's not up by now, server is unreachable
+  // WS not connected after network settle time → server unreachable → AP mode
   if (!state.wsEverConnected && state.serverWs?.readyState !== WebSocket.OPEN) {
+    log('warn', '[net] server unreachable after startup — entering AP mode');
     await enterApMode();
   }
 }
@@ -215,7 +228,8 @@ startX11vncDaemon();
 
 localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
   log('info', `[daemon] local server on port ${LOCAL_PORT}`);
-  setTimeout(() => cdpNavigate(`http://localhost:${LOCAL_PORT}/`), 3000);
+  // Start on the connecting screen — navigate to home only once WS connects
+  setTimeout(() => cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`), 3000);
 });
 
 connectToServer();

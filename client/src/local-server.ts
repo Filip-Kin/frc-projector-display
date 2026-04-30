@@ -51,6 +51,7 @@ app.get('/youtube', (req, res) => {
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>*{margin:0;padding:0;box-sizing:border-box}html,body{width:100%;height:100%;background:#000;overflow:hidden}iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}</style></head><body><iframe src="https://www.youtube.com/embed/${id}?autoplay=1&rel=0" allow="autoplay;fullscreen" allowfullscreen></iframe></body></html>`);
 });
 
+app.get('/connecting', (_req, res) => res.send(buildConnectingPage()));
 app.get('/no-connection', (_req, res) => res.send(buildNoConnectionPage()));
 
 app.get('/api/wifi-scan', async (_req, res) => res.json(await scanWifi().catch(() => [])));
@@ -269,6 +270,25 @@ async function applyEth(){const ip=document.getElementById('eth-ip').value.trim(
 async function loadEthStatus(){const s=await fetch('/api/eth-status').then(r=>r.json()).catch(()=>({}));if(!s.iface){document.getElementById('eth-status').textContent='No ethernet adapter detected';return}const ip=s.ip||'No IP';const note=s.isLinkLocal?' (DHCP failed — link-local)':s.hasRoutableIp?' (connected)':' (no IP)';document.getElementById('eth-status').textContent=s.iface+': '+ip+note;if(s.ip)document.getElementById('eth-ip').value=s.ip}
 loadEthStatus();setEthMode('dhcp');
 </script>
+</body></html>`;
+}
+
+function buildConnectingPage() {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>FRC Display</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:24px}
+  .spinner{width:56px;height:56px;border:5px solid #222;border-top-color:#4af;border-radius:50%;
+    animation:spin 0.9s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  h1{font-size:1.6rem;font-weight:600;color:#888}
+  .version{font-size:.75rem;color:#333;position:fixed;bottom:12px;right:16px}
+</style></head>
+<body>
+  <div class="spinner"></div>
+  <h1>Connecting to server…</h1>
+  <div class="version">v${VERSION}</div>
 </body></html>`;
 }
 
