@@ -26,7 +26,7 @@ app.use('/novnc', express.static(join(import.meta.dir, '../node_modules/@novnc/n
 app.post('/auth/login', handleLogin);
 
 // Admin panel
-app.get('/admin', requireAuth, (_req, res) =>
+app.get('/admin', (_req, res) =>
   res.sendFile(join(import.meta.dir, '../public/admin.html'))
 );
 app.use('/api/admin', adminRouter);
