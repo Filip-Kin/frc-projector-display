@@ -217,44 +217,7 @@ echo "[11] Installing NDI tools..."
 # ndi-list-sources: uses avahi mDNS (no SDK needed) + falls back to NDI SDK tools
 cat > /usr/local/bin/ndi-list-sources << 'NDISCRIPT'
 #!/bin/bash
-python3 << 'PYEOF'
-import json, re, subprocess
-
-def avahi(svc):
-    try:
-        r = subprocess.run(['avahi-browse', '-t', '-r', '-p', svc],
-                           capture_output=True, text=True, timeout=3)
-        return r.stdout.split('\n')
-    except:
-        return []
-
-def unescape(s):
-    # avahi -p uses decimal escapes: \032 = chr(32) = space, etc.
-    return re.sub(r'\\(\d+)', lambda m: chr(int(m.group(1))), s).strip('"')
-
-# NDI sources (plain strings — ndi-play-wrapper takes the source name directly)
-ndi, seen = [], set()
-for line in avahi('_ndi._tcp'):
-    p = line.split(';')
-    if len(p) >= 5 and p[0] == '=':
-        name = unescape(p[4])
-        if name and name not in seen:
-            seen.add(name); ndi.append(name)
-
-# OMT sources ({label, value} objects — omt-play-wrapper strips omt:// prefix)
-omt, seen = [], set()
-for line in avahi('_omt._tcp'):
-    p = line.split(';')
-    if len(p) >= 9 and p[0] == '=':
-        name = unescape(p[4])
-        addr, port = p[7], p[8].strip()
-        key = f"{addr}:{port}"
-        if key and key not in seen:
-            seen.add(key)
-            omt.append({"label": f"OMT: {name}", "value": f"omt://{addr}:{port}"})
-
-print(json.dumps(ndi + omt))
-PYEOF
+python3 /usr/local/bin/ndi-sources.py
 NDISCRIPT
 chmod +x /usr/local/bin/ndi-list-sources
 
@@ -265,6 +228,45 @@ case "$(uname -m)" in
   armv7*|armhf)  NDI_TOOLS_ARCH="armhf" ;;
 esac
 NDI_TOOLS_URL="https://storage.googleapis.com/frc-display-assets/ndi-tools-linux-${NDI_TOOLS_ARCH}.tar.gz"
+
+# Write ndi-sources.py (avahi discovery, human-readable output parser)
+cat > /usr/local/bin/ndi-sources.py << 'PYSCRIPT'
+#!/usr/bin/env python3
+import json, re, subprocess
+
+def avahi_browse(svc):
+    try:
+        r = subprocess.run(['avahi-browse', '-t', '-r', svc],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return []
+    results = []
+    current_name = None; addr = None
+    for line in r.stdout.split('\n'):
+        m = re.match(r'^=\s+\S+\s+\S+\s+(.+?)\s{2,}' + re.escape(svc), line)
+        if m:
+            current_name = m.group(1).strip(); addr = None; continue
+        if current_name:
+            am = re.match(r'\s+address\s*=\s*\[(.+?)\]', line)
+            pm = re.match(r'\s+port\s*=\s*\[(\d+)\]', line)
+            if am: addr = am.group(1)
+            if pm and addr: results.append((current_name, addr, pm.group(1))); current_name = None
+    return results
+
+ndi, seen = [], set()
+for name, _a, _p in avahi_browse('_ndi._tcp'):
+    if name not in seen: seen.add(name); ndi.append(name)
+
+omt, seen = [], set()
+for name, addr, port in avahi_browse('_omt._tcp'):
+    key = f'{addr}:{port}'
+    if key not in seen:
+        seen.add(key)
+        omt.append({'label': f'OMT: {name}', 'value': f'omt://{addr}:{port}'})
+
+print(json.dumps(ndi + omt))
+PYSCRIPT
+chmod +x /usr/local/bin/ndi-sources.py
 
 echo "  [NDI] Installing ndi-play from ${NDI_TOOLS_URL}..."
 TMP_NDI=$(mktemp -d)
