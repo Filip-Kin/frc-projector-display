@@ -26,7 +26,7 @@ echo "[2] Installing system packages..."
 apt-get install -y \
   xorg openbox lightdm lightdm-gtk-greeter \
   chromium x11vnc qrencode \
-  ffmpeg git curl
+  ffmpeg git curl unclutter
 
 # ── LightDM autologin ─────────────────────────────────────────────────────────
 echo "[3] Configuring LightDM autologin..."
@@ -47,10 +47,14 @@ xset s off &
 xset -dpms &
 xset s noblank &
 
+# Hide cursor after 1s idle (reappears on mouse movement e.g. during VNC)
+unclutter -idle 1 -root &
+
 # Launch Chromium in kiosk mode with CDP enabled
 chromium --kiosk --no-sandbox --disable-infobars \
   --disable-translate --disable-features=TranslateUI \
   --no-first-run --disable-default-apps \
+  --autoplay-policy=no-user-gesture-required \
   --remote-debugging-port=9222 \
   http://localhost:3000/ &
 EOF
@@ -101,6 +105,8 @@ User=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}/client
 Environment=SERVER_URL=${SERVER_URL}
 Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
 ExecStart=/usr/bin/node ${INSTALL_DIR}/client/src/daemon.js
 Restart=on-failure
 RestartSec=5

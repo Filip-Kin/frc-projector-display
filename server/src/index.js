@@ -1,6 +1,7 @@
 const express = require('express');
 const { WebSocketServer, WebSocket } = require('ws');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const url = require('url');
 
@@ -10,11 +11,35 @@ const app = express();
 const server = http.createServer(app);
 
 app.use(express.static(path.join(__dirname, '../public')));
-app.use('/novnc', express.static(path.join(__dirname, '../../node_modules/@novnc/novnc')));
+app.use('/novnc', express.static(path.join(__dirname, '../node_modules/@novnc/novnc')));
 
 app.get('/', (req, res) => res.redirect('/control'));
 app.get('/control', (req, res) => res.sendFile(path.join(__dirname, '../public/control.html')));
 app.get('/vnc/:pin', (req, res) => res.sendFile(path.join(__dirname, '../public/vnc.html')));
+
+app.get('/api/nexus/events', (req, res) => {
+  const apiKey = process.env.NEXUS_API_KEY;
+  if (!apiKey) { res.json([]); return; }
+  https.get({
+    hostname: 'frc.nexus',
+    path: '/api/v1/events',
+    headers: { 'Nexus-Api-Key': apiKey }
+  }, (r) => {
+    let data = '';
+    r.on('data', c => data += c);
+    r.on('end', () => {
+      try {
+        const raw = JSON.parse(data);
+        const now = Date.now();
+        const events = Object.entries(raw)
+          .filter(([, e]) => e.end > now)
+          .map(([key, e]) => ({ key, name: e.name, start: e.start }))
+          .sort((a, b) => a.start - b.start);
+        res.json(events);
+      } catch { res.json([]); }
+    });
+  }).on('error', () => res.json([]));
+});
 
 // State maps
 const devices = new Map();      // pin -> { ws, ndiSources, lastSeen }
@@ -68,6 +93,16 @@ function handleDevice(ws) {
           ctrl.send(JSON.stringify({ type: 'ndi_sources', sources: msg.sources }));
         }
       }
+    } else if (msg.type === 'audio_sinks') {
+      if (pin && devices.has(pin)) {
+        const d = devices.get(pin);
+        d.audioSinks = msg.sinks || [];
+        d.audioState = msg.state || {};
+        const ctrl = controllers.get(pin);
+        if (ctrl?.readyState === WebSocket.OPEN) {
+          ctrl.send(JSON.stringify({ type: 'audio_sinks', sinks: msg.sinks, state: msg.state }));
+        }
+      }
     }
   });
 
@@ -89,7 +124,7 @@ function handleController(ws, rawPin) {
 
   const device = devices.get(pin);
   ws.send(JSON.stringify(device
-    ? { type: 'device_connected', ndiSources: device.ndiSources }
+    ? { type: 'device_connected', ndiSources: device.ndiSources, audioSinks: device.audioSinks, audioState: device.audioState }
     : { type: 'device_disconnected' }
   ));
 

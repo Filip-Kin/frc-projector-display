@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>FRC Display Control</title>
+<title>Configure Display</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -62,7 +62,24 @@
     background: #333;
     color: #f0f0f0;
   }
-  button.danger { background: #f44; color: #fff; }
+  #recent-pins {
+    display: none;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .pin-chip {
+    background: #1c1c1c;
+    border: 1px solid #333;
+    border-radius: 20px;
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    color: #ccc;
+    white-space: nowrap;
+  }
+  .pin-chip:active { background: #2a2a2a; }
+  .chip-time { color: #555; margin-left: 4px; }
   #control-section { display: none; }
   .section-title {
     font-size: 0.75rem;
@@ -124,13 +141,42 @@
   }
   .apply-row { display: flex; gap: 8px; margin-top: 14px; }
   .apply-row button { flex: 1; }
-  #ndi-refresh { padding: 12px; flex: 0 0 auto; }
-  .qr-btn {
-    width: 100%;
-    margin-top: 8px;
-    background: #2a2a1a;
-    color: #fa0;
-    border: 1px solid #fa04;
+  #audio-section {
+    background: #1c1c1c;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  #audio-section label {
+    display: block;
+    font-size: 0.8rem;
+    color: #888;
+    margin-bottom: 6px;
+  }
+  .volume-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  #mute-btn {
+    flex: 0 0 auto;
+    padding: 10px 14px;
+    font-size: 1.1rem;
+    background: #252525;
+    color: #f0f0f0;
+  }
+  input[type=range] {
+    flex: 1;
+    accent-color: #4af;
+    height: 4px;
+    cursor: pointer;
+  }
+  #volume-label {
+    font-size: 0.85rem;
+    color: #888;
+    min-width: 38px;
+    text-align: right;
   }
   .toast {
     position: fixed;
@@ -153,13 +199,15 @@
 </head>
 <body>
 
-<h1>FRC Display Control</h1>
+<h1>Configure Display</h1>
 
 <div id="connect-section">
   <div class="pin-row">
-    <input type="text" id="pin-input" placeholder="Enter PIN (e.g. A3X9K2)" maxlength="6" autocomplete="off" autocapitalize="characters">
+    <input type="text" id="pin-input" list="pin-suggestions" placeholder="Enter PIN (e.g. A3X9K2)" maxlength="6" autocomplete="off" autocapitalize="characters">
+    <datalist id="pin-suggestions"></datalist>
     <button id="connect-btn" onclick="connect()">Connect</button>
   </div>
+  <div id="recent-pins"></div>
 </div>
 
 <div class="status-bar">
@@ -201,9 +249,8 @@
     <label>NDI Source</label>
     <div style="display:flex;gap:8px">
       <select id="ndi-source-select" style="flex:1">
-        <option value="">-- no sources found --</option>
+        <option value="">-- refreshing sources… --</option>
       </select>
-      <button id="ndi-refresh" class="secondary" onclick="refreshNdi()" title="Refresh">↻</button>
     </div>
     <div class="apply-row">
       <button onclick="applyMode()">Apply</button>
@@ -219,8 +266,11 @@
 
   <!-- Nexus config -->
   <div class="mode-config" id="config-nexus">
-    <label>Nexus Event ID</label>
-    <input type="text" id="nexus-event" placeholder="e.g. 2025MIGLE">
+    <label>Nexus Event</label>
+    <select id="nexus-event-select" style="display:none">
+      <option value="">-- loading events… --</option>
+    </select>
+    <input type="text" id="nexus-event-input" placeholder="e.g. 2026curie">
     <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
   </div>
 
@@ -244,7 +294,19 @@
     <div class="apply-row"><button onclick="applyMode()">Open VNC</button></div>
   </div>
 
-  <button class="qr-btn" onclick="showQr()">📱 Show QR Code on Screen</button>
+  <!-- Audio controls -->
+  <div class="section-title">Audio</div>
+  <div id="audio-section">
+    <label>Output Device</label>
+    <select id="audio-sink-select" onchange="setAudioOutput(this.value)">
+      <option value="">-- detecting… --</option>
+    </select>
+    <div class="volume-row">
+      <button id="mute-btn" class="secondary" onclick="toggleMute()">🔊</button>
+      <input type="range" id="volume-slider" min="0" max="100" value="100" oninput="onVolumeInput(this.value)">
+      <span id="volume-label">100%</span>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -252,15 +314,61 @@
 <script>
 let ws = null;
 let currentPin = '';
-let currentMode = 'home';
+let selectedMode = null;
 let ndiSources = [];
+let ndiRefreshTimer = null;
+let reconnectTimer = null;
+let isMuted = false;
+let nexusEvents = [];
 
-const params = new URLSearchParams(window.location.search);
-const prePin = params.get('pin');
+// ── Init ──────────────────────────────────────────────────────────────────────
+
+renderRecentPins();
+loadNexusEvents();
+
+const prePin = new URLSearchParams(location.search).get('pin');
 if (prePin) {
   document.getElementById('pin-input').value = prePin.toUpperCase();
   setTimeout(connect, 200);
 }
+
+// ── Recent PINs ───────────────────────────────────────────────────────────────
+
+function saveRecentPin(pin) {
+  let recents = JSON.parse(localStorage.getItem('recentPins') || '[]');
+  recents = recents.filter(r => r.pin !== pin);
+  recents.unshift({ pin, lastUsed: Date.now() });
+  recents = recents.slice(0, 10);
+  localStorage.setItem('recentPins', JSON.stringify(recents));
+  renderRecentPins();
+}
+
+function renderRecentPins() {
+  const recents = JSON.parse(localStorage.getItem('recentPins') || '[]');
+  const dl = document.getElementById('pin-suggestions');
+  dl.innerHTML = recents.map(r => `<option value="${r.pin}">`).join('');
+  const el = document.getElementById('recent-pins');
+  if (!recents.length) { el.style.display = 'none'; return; }
+  el.style.display = 'flex';
+  el.innerHTML = recents.map(r =>
+    `<div class="pin-chip" onclick="connectTo('${r.pin}')">${r.pin}<span class="chip-time">${relTime(r.lastUsed)}</span></div>`
+  ).join('');
+}
+
+function relTime(ts) {
+  const d = Date.now() - ts;
+  if (d < 60000) return ' · just now';
+  if (d < 3600000) return ` · ${Math.floor(d / 60000)}m ago`;
+  if (d < 86400000) return ` · ${Math.floor(d / 3600000)}h ago`;
+  return ` · ${Math.floor(d / 86400000)}d ago`;
+}
+
+function connectTo(pin) {
+  document.getElementById('pin-input').value = pin;
+  connect();
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
 
 function wsUrl(path) {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -268,11 +376,13 @@ function wsUrl(path) {
 }
 
 function connect() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   const pin = document.getElementById('pin-input').value.trim().toUpperCase();
   if (!pin || pin.length < 4) { toast('Enter a valid PIN'); return; }
   currentPin = pin;
+  history.replaceState(null, '', `?pin=${pin}`);
 
-  if (ws) ws.close();
+  if (ws) { ws.onclose = null; ws.onerror = null; ws.close(); ws = null; }
 
   setStatus('connecting', `Connecting (PIN: ${pin})…`);
   ws = new WebSocket(wsUrl(`/ws/control?pin=${pin}`));
@@ -280,22 +390,27 @@ function connect() {
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'device_connected') {
+      saveRecentPin(pin);
       setStatus('online', `Connected · PIN ${pin}`);
       document.getElementById('control-section').style.display = 'block';
       if (msg.ndiSources) updateNdiSources(msg.ndiSources);
+      if (msg.audioSinks) updateAudioSinks(msg.audioSinks, msg.audioState);
     } else if (msg.type === 'device_disconnected') {
       setStatus('offline', `Waiting for device (PIN: ${pin})`);
       document.getElementById('control-section').style.display = 'none';
     } else if (msg.type === 'ndi_sources') {
       updateNdiSources(msg.sources);
+    } else if (msg.type === 'audio_sinks') {
+      updateAudioSinks(msg.sinks, msg.state);
     } else if (msg.type === 'error') {
       toast(msg.message);
     }
   };
 
   ws.onclose = () => {
-    setStatus('offline', 'Disconnected — tap Connect to retry');
+    setStatus('offline', 'Reconnecting…');
     document.getElementById('control-section').style.display = 'none';
+    reconnectTimer = setTimeout(connect, 3000);
   };
 
   ws.onerror = () => toast('WebSocket error');
@@ -307,25 +422,39 @@ function setStatus(state, text) {
   document.getElementById('status-text').textContent = text;
 }
 
-let selectedMode = null;
+function sendMsg(msg) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return false; }
+  ws.send(JSON.stringify(msg));
+  return true;
+}
+
+// ── Mode selection ────────────────────────────────────────────────────────────
 
 function selectMode(mode) {
   if (mode === 'fta') return;
+
+  // Clear NDI auto-refresh from previous mode
+  if (ndiRefreshTimer) { clearInterval(ndiRefreshTimer); ndiRefreshTimer = null; }
+
   selectedMode = mode;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
   document.getElementById('mode-' + mode)?.classList.add('active');
   document.querySelectorAll('.mode-config').forEach(c => c.classList.remove('visible'));
   const cfg = document.getElementById('config-' + mode);
   if (cfg) cfg.classList.add('visible');
+
+  if (mode === 'home') {
+    sendMsg({ type: 'set_mode', mode: 'home' });
+  } else if (mode === 'ndi') {
+    sendMsg({ type: 'refresh_ndi' });
+    ndiRefreshTimer = setInterval(() => sendMsg({ type: 'refresh_ndi' }), 20000);
+  }
 }
 
 function applyMode() {
   if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
   let msg;
   switch (selectedMode) {
-    case 'home':
-      msg = { type: 'set_mode', mode: 'home' };
-      break;
     case 'ndi': {
       const src = document.getElementById('ndi-source-select').value;
       if (!src) { toast('Select an NDI source'); return; }
@@ -339,16 +468,19 @@ function applyMode() {
       break;
     }
     case 'nexus': {
-      const ev = document.getElementById('nexus-event').value.trim();
-      if (!ev) { toast('Enter Nexus event ID'); return; }
-      msg = { type: 'set_mode', mode: 'chromium', url: `https://frc.nexus/en/event/${ev}/pitdisplay` };
+      const sel = document.getElementById('nexus-event-select');
+      const inp = document.getElementById('nexus-event-input');
+      const ev = sel.style.display !== 'none' ? sel.value : inp.value.trim();
+      if (!ev) { toast('Select or enter Nexus event ID'); return; }
+      msg = { type: 'set_mode', mode: 'chromium', url: `https://frc.nexus/en/event/${ev}/display/pit` };
       break;
     }
     case 'youtube': {
-      let val = document.getElementById('youtube-id').value.trim();
+      const val = document.getElementById('youtube-id').value.trim();
       if (!val) { toast('Enter YouTube URL or ID'); return; }
-      if (!val.startsWith('http')) val = `https://www.youtube.com/watch?v=${val}`;
-      msg = { type: 'set_mode', mode: 'chromium', url: val };
+      const id = extractYouTubeId(val);
+      if (!id) { toast('Could not parse YouTube video ID'); return; }
+      msg = { type: 'set_mode', mode: 'chromium', url: `http://localhost:3000/youtube?v=${id}` };
       break;
     }
     case 'url': {
@@ -368,17 +500,7 @@ function applyMode() {
   toast('Sent!');
 }
 
-function showQr() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
-  ws.send(JSON.stringify({ type: 'show_qr' }));
-  toast('QR code shown for 20 seconds');
-}
-
-function refreshNdi() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
-  ws.send(JSON.stringify({ type: 'refresh_ndi' }));
-  toast('Refreshing NDI sources…');
-}
+// ── NDI ───────────────────────────────────────────────────────────────────────
 
 function updateNdiSources(sources) {
   ndiSources = sources || [];
@@ -390,6 +512,66 @@ function updateNdiSources(sources) {
   if (prev && ndiSources.includes(prev)) sel.value = prev;
 }
 
+// ── YouTube ───────────────────────────────────────────────────────────────────
+
+function extractYouTubeId(val) {
+  const m = val.match(/(?:[?&]v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  if (m) return m[1];
+  if (/^[A-Za-z0-9_-]{11}$/.test(val)) return val;
+  return null;
+}
+
+// ── Nexus events ──────────────────────────────────────────────────────────────
+
+async function loadNexusEvents() {
+  try {
+    const r = await fetch('/api/nexus/events');
+    const events = await r.json();
+    if (events.length) {
+      nexusEvents = events;
+      const sel = document.getElementById('nexus-event-select');
+      sel.innerHTML = events.map(e => `<option value="${e.key}">${e.name} (${e.key})</option>`).join('');
+      sel.style.display = '';
+      document.getElementById('nexus-event-input').style.display = 'none';
+    }
+  } catch {}
+}
+
+// ── Audio ─────────────────────────────────────────────────────────────────────
+
+function updateAudioSinks(sinks, state) {
+  const sel = document.getElementById('audio-sink-select');
+  sel.innerHTML = (sinks && sinks.length)
+    ? sinks.map(s => `<option value="${s.name}">${s.description}</option>`).join('')
+    : '<option value="">-- no sinks found --</option>';
+  if (state) {
+    if (state.sink) sel.value = state.sink;
+    document.getElementById('volume-slider').value = state.volume ?? 100;
+    document.getElementById('volume-label').textContent = (state.volume ?? 100) + '%';
+    isMuted = !!state.muted;
+    document.getElementById('mute-btn').textContent = isMuted ? '🔇' : '🔊';
+  }
+}
+
+function setAudioOutput(sink) {
+  sendMsg({ type: 'set_audio_output', sink });
+}
+
+let volumeDebounce = null;
+function onVolumeInput(val) {
+  document.getElementById('volume-label').textContent = val + '%';
+  clearTimeout(volumeDebounce);
+  volumeDebounce = setTimeout(() => sendMsg({ type: 'set_volume', volume: parseInt(val) }), 150);
+}
+
+function toggleMute() {
+  isMuted = !isMuted;
+  document.getElementById('mute-btn').textContent = isMuted ? '🔇' : '🔊';
+  sendMsg({ type: 'set_mute', muted: isMuted });
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+
 function toast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg;
@@ -397,6 +579,8 @@ function toast(msg) {
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.remove('show'), 2200);
 }
+
+// ── Keyboard ──────────────────────────────────────────────────────────────────
 
 document.getElementById('pin-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') connect();

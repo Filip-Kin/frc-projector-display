@@ -1,9 +1,8 @@
 const express = require('express');
 const { WebSocket } = require('ws');
 const http = require('http');
-const https = require('https');
 const net = require('net');
-const { execFile, spawn } = require('child_process');
+const { execFile, exec, spawn } = require('child_process');
 const path = require('path');
 const QRCode = require('qrcode');
 
@@ -29,9 +28,22 @@ app.get('/', async (req, res) => {
   res.send(buildQrPage(qrDataUrl));
 });
 
-app.get('/qr-overlay', async (req, res) => {
-  const qrDataUrl = await QRCode.toDataURL(CONTROL_URL, { width: 400, margin: 2, color: { dark: '#000', light: '#fff' } });
-  res.send(buildOverlayPage(qrDataUrl));
+app.get('/youtube', (req, res) => {
+  const videoId = req.query.v || '';
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+  iframe { position: fixed; top: 0; left: 0; width: 100%; height: 100%; border: 0; }
+</style>
+</head>
+<body>
+<iframe src="https://www.youtube.com/embed/${videoId}?autoplay=1&rel=0" allow="autoplay; fullscreen" allowfullscreen></iframe>
+</body>
+</html>`);
 });
 
 function buildQrPage(qrDataUrl) {
@@ -84,51 +96,6 @@ function buildQrPage(qrDataUrl) {
 </html>`;
 }
 
-function buildOverlayPage(qrDataUrl) {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>Scan to Connect</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: rgba(0,0,0,0.92);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    height: 100vh;
-    font-family: sans-serif;
-    gap: 24px;
-    color: #fff;
-  }
-  .qr-box { background: #fff; padding: 16px; border-radius: 12px; }
-  .qr-box img { display: block; width: 320px; height: 320px; }
-  .pin { font-size: 3rem; font-weight: 800; letter-spacing: 0.3em; color: #4af; }
-  .countdown { font-size: 1rem; color: #888; }
-</style>
-<script>
-  let t = 20;
-  const el = document.getElementById ? null : null;
-  window.onload = () => {
-    const el = document.getElementById('countdown');
-    const iv = setInterval(() => {
-      t--;
-      el.textContent = t + 's';
-      if (t <= 0) clearInterval(iv);
-    }, 1000);
-  };
-</script>
-</head>
-<body>
-  <div class="qr-box"><img src="${qrDataUrl}" alt="QR Code"></div>
-  <div class="pin">${PIN}</div>
-  <div class="countdown" id="countdown">20s</div>
-</body>
-</html>`;
-}
-
 const localServer = http.createServer(app);
 localServer.listen(LOCAL_PORT, '127.0.0.1', () => {
   console.log(`[daemon] local server on port ${LOCAL_PORT}`);
@@ -141,7 +108,6 @@ let ndiProcess = null;
 let x11vncProcess = null;
 let vncBridgeSocket = null;
 let vncBridgeWs = null;
-let qrOverlayTimer = null;
 
 // ── CDP helpers ───────────────────────────────────────────────────────────────
 
@@ -216,7 +182,6 @@ async function setChromium(url) {
 function setNdi(source) {
   stopNdi();
   stopVnc();
-  // Chromium should not obstruct fullscreen ffplay; navigate to blank to black the window
   cdpNavigate('about:blank');
 
   const display = process.env.DISPLAY || ':0';
@@ -224,7 +189,7 @@ function setNdi(source) {
     '-f', 'libndi_newtek',
     '-i', source,
     '-fs',
-    '-an',  // disable audio if not needed
+    '-an',
     '-loglevel', 'quiet'
   ], {
     env: { ...process.env, DISPLAY: display },
@@ -257,7 +222,6 @@ function setVnc(serverWs) {
     x11vncProcess = null;
   });
 
-  // Give x11vnc a moment to bind
   setTimeout(() => connectVncBridge(serverWs), 1500);
   console.log('[vnc] started x11vnc');
 }
@@ -321,6 +285,40 @@ async function getNdiSources() {
   });
 }
 
+// ── Audio ─────────────────────────────────────────────────────────────────────
+
+async function getAudioSinks() {
+  return new Promise((resolve) => {
+    exec('pactl list sinks', { env: process.env }, (err, stdout) => {
+      if (err) { resolve([]); return; }
+      const sinks = [];
+      const blocks = stdout.split(/^Sink #/m).slice(1);
+      for (const block of blocks) {
+        const name = block.match(/\tName:\s*(.+)/)?.[1]?.trim();
+        const desc = block.match(/\tDescription:\s*(.+)/)?.[1]?.trim();
+        if (name) sinks.push({ name, description: desc || name });
+      }
+      resolve(sinks);
+    });
+  });
+}
+
+async function getAudioState() {
+  return new Promise((resolve) => {
+    exec('pactl info; pactl get-sink-volume @DEFAULT_SINK@; pactl get-sink-mute @DEFAULT_SINK@',
+      { env: process.env },
+      (err, stdout) => {
+        if (err) { resolve({ sink: '', volume: 100, muted: false }); return; }
+        const sink = stdout.match(/Default Sink:\s*(.+)/)?.[1]?.trim() || '';
+        const volMatch = stdout.match(/(\d+)%/);
+        const volume = volMatch ? parseInt(volMatch[1]) : 100;
+        const muted = /Mute:\s*yes/i.test(stdout);
+        resolve({ sink, volume, muted });
+      }
+    );
+  });
+}
+
 // ── Server WebSocket connection ───────────────────────────────────────────────
 
 let serverWs = null;
@@ -332,12 +330,22 @@ function connectToServer() {
 
   serverWs = new WebSocket(wsUrl);
 
-  serverWs.on('open', () => {
+  serverWs.on('open', async () => {
     console.log('[ws] connected to server');
     reconnectDelay = 2000;
     serverWs.send(JSON.stringify({ type: 'register', pin: PIN }));
     startHeartbeat();
     startNdiPolling();
+    // Send audio sinks asynchronously after registering
+    try {
+      const sinks = await getAudioSinks();
+      const state = await getAudioState();
+      if (serverWs?.readyState === WebSocket.OPEN) {
+        serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state }));
+      }
+    } catch (err) {
+      console.error('[audio] failed to get audio info:', err.message);
+    }
   });
 
   serverWs.on('message', async (data) => {
@@ -361,11 +369,26 @@ function connectToServer() {
           setVnc(serverWs);
           break;
       }
-    } else if (msg.type === 'show_qr') {
-      await showQrOverlay();
     } else if (msg.type === 'refresh_ndi') {
       const sources = await getNdiSources();
-      serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
+      if (serverWs?.readyState === WebSocket.OPEN) {
+        serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
+      }
+    } else if (msg.type === 'set_audio_output') {
+      if (msg.sink) {
+        execFile('pactl', ['set-default-sink', msg.sink], { env: process.env }, (err) => {
+          if (err) console.error('[audio] set-default-sink error:', err.message);
+        });
+      }
+    } else if (msg.type === 'set_volume') {
+      const vol = Math.max(0, Math.min(100, parseInt(msg.volume) || 0));
+      execFile('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${vol}%`], { env: process.env }, (err) => {
+        if (err) console.error('[audio] set-volume error:', err.message);
+      });
+    } else if (msg.type === 'set_mute') {
+      execFile('pactl', ['set-sink-mute', '@DEFAULT_SINK@', msg.muted ? '1' : '0'], { env: process.env }, (err) => {
+        if (err) console.error('[audio] set-mute error:', err.message);
+      });
     }
   });
 
@@ -380,19 +403,6 @@ function connectToServer() {
   serverWs.on('error', (err) => {
     console.error('[ws] error:', err.message);
   });
-}
-
-async function showQrOverlay() {
-  if (qrOverlayTimer) { clearTimeout(qrOverlayTimer); }
-  await cdpNavigate(`http://localhost:${LOCAL_PORT}/qr-overlay`);
-  qrOverlayTimer = setTimeout(async () => {
-    qrOverlayTimer = null;
-    // Resume previous mode
-    switch (currentMode) {
-      case 'home': await setHome(); break;
-      default: await setHome(); break;
-    }
-  }, 20000);
 }
 
 // ── Heartbeat ─────────────────────────────────────────────────────────────────
@@ -421,7 +431,7 @@ function startNdiPolling() {
     if (serverWs?.readyState === WebSocket.OPEN) {
       serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
     }
-  }, 30000);
+  }, 20000);
 }
 
 function stopNdiPolling() {
