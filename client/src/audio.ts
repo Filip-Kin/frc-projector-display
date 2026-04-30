@@ -20,21 +20,19 @@ export async function getAudioSinks(): Promise<AudioSink[]> {
         if (name) sinks.push({ name, description: desc ?? name });
       }
 
-      // Look for HDMI profiles that aren't currently active
-      const activeHdmi = sinks.some(s => s.name.includes('hdmi'));
-      if (!activeHdmi) {
-        for (const cardBlock of cardsRaw.split(/^Card #/m).slice(1)) {
-          const cardName = cardBlock.match(/\tName:\s*(.+)/)?.[1]?.trim();
-          if (!cardName) continue;
-          // Use the HDMI+analog profile (keeps analog input) as preferred
-          const preferred = 'output:hdmi-stereo+input:analog-stereo';
-          if (cardBlock.includes(preferred)) {
-            sinks.push({
-              name: `${PROFILE_PREFIX}${cardName}:${preferred}`,
-              description: 'HDMI / DisplayPort',
-            });
-            break; // only one HDMI option per card
-          }
+      // Always show both analog and HDMI options — add virtual entries for
+      // whichever profile(s) aren't currently active so user can switch back
+      const activeHdmi   = sinks.some(s => s.name.includes('hdmi'));
+      const activeAnalog = sinks.some(s => s.name.includes('analog'));
+
+      for (const cardBlock of cardsRaw.split(/^Card #/m).slice(1)) {
+        const cardName = cardBlock.match(/\tName:\s*(.+)/)?.[1]?.trim();
+        if (!cardName) continue;
+        if (!activeHdmi && cardBlock.includes('output:hdmi-stereo+input:analog-stereo')) {
+          sinks.push({ name: `${PROFILE_PREFIX}${cardName}:output:hdmi-stereo+input:analog-stereo`, description: 'HDMI / DisplayPort' });
+        }
+        if (!activeAnalog && cardBlock.includes('output:analog-stereo+input:analog-stereo')) {
+          sinks.push({ name: `${PROFILE_PREFIX}${cardName}:output:analog-stereo+input:analog-stereo`, description: 'Built-in Audio Analog Stereo' });
         }
       }
 

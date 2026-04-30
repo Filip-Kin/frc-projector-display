@@ -58,7 +58,14 @@ case $PKG_MGR in
       ffmpeg curl tar python3 \
       network-manager dnsmasq iptables \
       avahi-utils \
-      pipewire pipewire-pulse wireplumber pulseaudio-utils >/dev/null ;;
+      pipewire pipewire-pulse wireplumber pulseaudio-utils \
+      libasound2-plugins >/dev/null
+    # Route all ALSA apps (including Chromium's audio service) through PipeWire
+    cat > /etc/asound.conf << 'ASOUNDEOF'
+pcm.default pulse
+ctl.default pulse
+ASOUNDEOF
+    ;;
   dnf)
     dnf install -y \
       xorg-x11-server-Xorg openbox lightdm lightdm-gtk-greeter \
