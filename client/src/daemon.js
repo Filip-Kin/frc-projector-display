@@ -191,6 +191,9 @@ async function enterApMode() {
 const localServer = http.createServer(app);
 localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
   console.log(`[daemon] local server on port ${LOCAL_PORT}`);
+  // Navigate Chromium to the home QR page on every startup.
+  // Short delay to let Chromium finish starting if this is a fresh boot.
+  setTimeout(() => cdpNavigate(`http://localhost:${LOCAL_PORT}/`), 3000);
 });
 
 // ── CDP helpers ───────────────────────────────────────────────────────────────
