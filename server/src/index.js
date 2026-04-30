@@ -30,10 +30,6 @@ app.get('/install.sh', (req, res) => {
   res.sendFile(path.join(__dirname, '../client-dist/install.sh'));
 });
 
-app.get('/update.sh', (req, res) => {
-  res.setHeader('Content-Type', 'text/plain');
-  res.sendFile(path.join(__dirname, '../client-dist/update.sh'));
-});
 
 app.get('/api/nexus/events', (req, res) => {
   const apiKey = process.env.NEXUS_API_KEY;

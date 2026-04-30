@@ -2,13 +2,15 @@
 
 Phone-controlled projector display system for FRC competitions.
 
-A Lenovo ThinkCentre thin client runs a kiosk display (Chromium + ffplay), controlled remotely via a phone-accessible web interface served from `display.filipkin.com`. Connection is established via QR code displayed on screen.
+A thin client runs a kiosk display (Chromium + ffplay), controlled remotely via a phone-accessible web interface served from `display.filipkin.com`. Connection is established via QR code displayed on screen.
+
+The server self-hosts the client installer and update bundle — no GitHub access required on the target device.
 
 ## Repo layout
 
 ```
 server/    Node.js WebSocket hub + mobile control UI (deploys to display.filipkin.com)
-client/    Node.js daemon + local web server (runs on thin client at 192.168.1.17)
+client/    Node.js daemon + local web server (runs on thin client)
 docs/      SETUP.md — full provisioning runbook
 ```
 
@@ -30,5 +32,14 @@ See [docs/SETUP.md](docs/SETUP.md) for the full provisioning runbook.
 
 Quick start on thin client:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Filip-Kin/frc-projector-display/main/client/install.sh | sudo bash
+curl -fsSL https://display.filipkin.com/install.sh | sudo bash
 ```
+
+Optional env vars:
+```bash
+SERVER_URL=https://display.filipkin.com   # default
+SERVICE_USER=display                       # local kiosk user (created if missing)
+INSTALL_DIR=/opt/frc-projector-display/client
+```
+
+Auto-update: on every boot the daemon checks `display.filipkin.com/version.json` and pulls a new build if the version changed. Deploy a new version by bumping `client/package.json` and pushing — all devices update on next reboot.

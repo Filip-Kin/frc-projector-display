@@ -108,7 +108,7 @@ Replace `eth0` with the actual NIC name (`ip link` to check).
 Run the one-command installer (as root):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Filip-Kin/frc-projector-display/main/client/install.sh | sudo bash
+curl -fsSL https://display.filipkin.com/install.sh | sudo bash
 ```
 
 This installs:
