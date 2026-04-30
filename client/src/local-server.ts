@@ -7,7 +7,7 @@ import { state } from './state.js';
 import { cdpNavigate } from './cdp.js';
 import { stopAp, startAp, connectWifi, scanWifi, checkInternet } from './wifi.js';
 import { getEthernetInterface, getEthernetStatus, applyDhcp, applyCustomStaticIp } from './network.js';
-import { setHome } from './modes.js';
+import { setHome, stopNdi, stopVnc } from './modes.js';
 
 export const LOCAL_PORT = parseInt(process.env.LOCAL_PORT ?? '3000', 10);
 export const AP_IP = '192.168.4.1';
@@ -50,6 +50,8 @@ app.get('/youtube', (req, res) => {
   const id = req.query.v ?? '';
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>*{margin:0;padding:0;box-sizing:border-box}html,body{width:100%;height:100%;background:#000;overflow:hidden}iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}</style></head><body><iframe src="https://www.youtube.com/embed/${id}?autoplay=1&rel=0" allow="autoplay;fullscreen" allowfullscreen></iframe></body></html>`);
 });
+
+app.get('/no-connection', (_req, res) => res.send(buildNoConnectionPage()));
 
 app.get('/api/wifi-scan', async (_req, res) => res.json(await scanWifi().catch(() => [])));
 
@@ -163,9 +165,20 @@ export async function runPostConnect() {
 }
 
 export async function enterApMode() {
+  // Stop any active media — ndi-play covers Chromium fullscreen so clear it first
+  await stopNdi();
+  stopVnc();
+
   const { getWifiInterface } = await import('./wifi.js');
   const iface = await getWifiInterface();
-  if (!iface) { console.log('[ap] no WiFi adapter — skipping AP mode'); return; }
+
+  if (!iface) {
+    // No WiFi adapter — can't create a hotspot, but still show the offline screen
+    console.log('[ap] no WiFi adapter — showing no-connection screen');
+    await cdpNavigate(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
+    return;
+  }
+
   console.log(`[ap] starting hotspot ${AP_SSID} on ${iface}`);
   try {
     await startAp(PIN, iface);
@@ -173,7 +186,11 @@ export async function enterApMode() {
     state.apIface = iface;
     console.log('[ap] hotspot active');
     await cdpNavigate(`http://localhost:${LOCAL_PORT}/`);
-  } catch (err: any) { console.error('[ap] failed:', err.message); }
+  } catch (err: any) {
+    console.error('[ap] failed:', err.message);
+    // AP failed — at least show the offline screen
+    await cdpNavigate(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
+  }
 }
 
 export const localServer = createServer(app);
@@ -252,5 +269,29 @@ async function applyEth(){const ip=document.getElementById('eth-ip').value.trim(
 async function loadEthStatus(){const s=await fetch('/api/eth-status').then(r=>r.json()).catch(()=>({}));if(!s.iface){document.getElementById('eth-status').textContent='No ethernet adapter detected';return}const ip=s.ip||'No IP';const note=s.isLinkLocal?' (DHCP failed — link-local)':s.hasRoutableIp?' (connected)':' (no IP)';document.getElementById('eth-status').textContent=s.iface+': '+ip+note;if(s.ip)document.getElementById('eth-ip').value=s.ip}
 loadEthStatus();setEthMode('dhcp');
 </script>
+</body></html>`;
+}
+
+function buildNoConnectionPage() {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>No Connection</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#1a0505;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:24px;text-align:center}
+  .icon{font-size:5rem}
+  h1{font-size:2.2rem;font-weight:800;color:#f44;letter-spacing:.02em}
+  p{font-size:1.1rem;color:#aaa;max-width:520px;line-height:1.6}
+  .url{font-size:.85rem;color:#555;margin-top:8px}
+  .version{font-size:.75rem;color:#2a2a2a;position:fixed;bottom:12px;right:16px}
+</style></head>
+<body>
+  <div class="icon">⚠️</div>
+  <h1>No Connection</h1>
+  <p>This display cannot reach the control server.<br>
+  Content on screen is <strong style="color:#f66">not live</strong>.</p>
+  <p>Connect this device to a network with internet access,<br>
+  or reboot it — a WiFi setup screen will appear after 20 seconds.</p>
+  <div class="url">${SERVER_BASE}</div>
+  <div class="version">v${VERSION}</div>
 </body></html>`;
 }
