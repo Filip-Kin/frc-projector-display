@@ -118,6 +118,8 @@ echo "[7] Downloading client from ${SERVER_URL}..."
 mkdir -p "$INSTALL_DIR"
 curl -fsSL --max-time 120 "${SERVER_URL}/client.tar.gz" | tar -xz -C "$INSTALL_DIR"
 cd "$INSTALL_DIR" && npm install --production --silent 2>/dev/null
+# Ensure service user owns the install dir so check-update.sh can write to it
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
 
 # ── NetworkManager + captive portal DNS ──────────────────────────────────────
 echo "[8] Configuring NetworkManager..."
