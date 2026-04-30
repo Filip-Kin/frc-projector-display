@@ -194,24 +194,40 @@ echo "[11] Installing NDI tools..."
 # ndi-list-sources: uses avahi mDNS (no SDK needed) + falls back to NDI SDK tools
 cat > /usr/local/bin/ndi-list-sources << 'NDISCRIPT'
 #!/bin/bash
-# Try avahi mDNS discovery first (works without NDI SDK)
-if command -v avahi-browse &>/dev/null; then
-  SOURCES=$(timeout 3 avahi-browse -t -r -p _ndi._tcp 2>/dev/null \
-    | awk -F';' '/^=/ {gsub(/"/, "", $5); if ($5 != "") print $5}' \
-    | sort -u)
-  if [ -n "$SOURCES" ]; then
-    python3 -c "import sys,json; lines=[l.strip() for l in sys.stdin if l.strip()]; print(json.dumps(lines))" <<< "$SOURCES"
-    exit 0
-  fi
-fi
-# Fall back to NDI SDK tools if installed
-if command -v ndi-directory-service &>/dev/null; then
-  timeout 3 ndi-directory-service list 2>/dev/null \
-    | grep -oP '(?<=Source: ).*' \
-    | python3 -c "import sys,json; lines=[l.strip() for l in sys.stdin if l.strip()]; print(json.dumps(lines))"
-  exit 0
-fi
-echo "[]"
+python3 << 'PYEOF'
+import json, subprocess
+
+def avahi(svc):
+    try:
+        r = subprocess.run(['avahi-browse', '-t', '-r', '-p', svc],
+                           capture_output=True, text=True, timeout=3)
+        return r.stdout.split('\n')
+    except:
+        return []
+
+# NDI sources (plain strings — ndi-play-wrapper takes the source name directly)
+ndi, seen = [], set()
+for line in avahi('_ndi._tcp'):
+    p = line.split(';')
+    if len(p) >= 5 and p[0] == '=':
+        name = p[4].strip('"')
+        if name and name not in seen:
+            seen.add(name); ndi.append(name)
+
+# OMT sources ({label, value} objects — omt-play-wrapper strips omt:// prefix)
+omt, seen = [], set()
+for line in avahi('_omt._tcp'):
+    p = line.split(';')
+    if len(p) >= 9 and p[0] == '=':
+        name = p[4].strip('"')
+        addr, port = p[7], p[8].strip()
+        key = f"{addr}:{port}"
+        if key and key not in seen:
+            seen.add(key)
+            omt.append({"label": f"OMT: {name} ({addr}:{port})", "value": f"omt://{addr}:{port}"})
+
+print(json.dumps(ndi + omt))
+PYEOF
 NDISCRIPT
 chmod +x /usr/local/bin/ndi-list-sources
 
@@ -236,6 +252,24 @@ else
   echo "  [NDI] Warning: could not download ndi-play (NDI playback unavailable)"
 fi
 rm -rf "$TMP_NDI"
+
+# ── OMT tools ─────────────────────────────────────────────────────────────────
+echo "  [OMT] Installing OMT tools..."
+NDI_TOOLS_ARCH="x86_64"
+case "$(uname -m)" in aarch64|arm64) NDI_TOOLS_ARCH="aarch64" ;; armv7*|armhf) NDI_TOOLS_ARCH="armhf" ;; esac
+OMT_TOOLS_URL="https://storage.googleapis.com/frc-display-assets/omt-tools-linux-${NDI_TOOLS_ARCH}.tar.gz"
+TMP_OMT=$(mktemp -d)
+if curl -fsSL --max-time 60 "$OMT_TOOLS_URL" | tar -xz -C "$TMP_OMT" 2>/dev/null; then
+  install -m 755 "$TMP_OMT/ffplay-omt"        /usr/local/bin/ffplay-omt
+  install -m 755 "$TMP_OMT/omt-play-wrapper"  /usr/local/bin/omt-play-wrapper
+  install -m 644 "$TMP_OMT/libomt.so"         /usr/local/lib/libomt.so
+  install -m 644 "$TMP_OMT/libvmx.so"         /usr/local/lib/libvmx.so
+  ldconfig
+  echo "  [OMT] installed"
+else
+  echo "  [OMT] Warning: could not download OMT tools (OMT playback unavailable)"
+fi
+rm -rf "$TMP_OMT"
 
 # ── Systemd service ────────────────────────────────────────────────────────────
 echo "[12] Installing systemd service..."

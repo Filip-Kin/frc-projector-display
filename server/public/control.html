@@ -509,9 +509,14 @@ function updateNdiSources(sources) {
   const sel = document.getElementById('ndi-source-select');
   const prev = sel.value;
   sel.innerHTML = ndiSources.length
-    ? ndiSources.map(s => `<option value="${s}">${s}</option>`).join('')
+    ? ndiSources.map(s => {
+        const label = typeof s === 'object' ? s.label : s;
+        const val = typeof s === 'object' ? s.value : s;
+        return `<option value="${val}">${label}</option>`;
+      }).join('')
     : '<option value="">-- no sources found --</option>';
-  if (prev && ndiSources.includes(prev)) sel.value = prev;
+  const prevValid = ndiSources.some(s => (typeof s === 'object' ? s.value : s) === prev);
+  if (prev && prevValid) sel.value = prev;
 }
 
 // ── YouTube ───────────────────────────────────────────────────────────────────

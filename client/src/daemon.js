@@ -249,19 +249,19 @@ function setNdi(source) {
   stopNdi(); stopVnc();
   cdpNavigate('about:blank');
   const display = process.env.DISPLAY || ':0';
-  // Detect SRT URL (open standard, works LAN + WAN) vs NDI source name
+  let cmd, args;
   if (source.startsWith('srt://')) {
-    ndiProcess = spawn('ffplay', [source, '-fs', '-loglevel', 'quiet'], {
-      env: { ...process.env, DISPLAY: display }, detached: false
-    });
-    console.log(`[srt] started ffplay for: ${source}`);
+    cmd = 'ffplay'; args = [source, '-fs', '-loglevel', 'quiet'];
+    console.log(`[srt] started for: ${source}`);
+  } else if (source.startsWith('omt://')) {
+    cmd = 'omt-play-wrapper'; args = [source]; // strips omt:// prefix, calls ffplay-omt -f libomt
+    console.log(`[omt] started for: ${source}`);
   } else {
-    ndiProcess = spawn('ndi-play-wrapper', [source], {
-      env: { ...process.env, DISPLAY: display }, detached: false
-    });
-    console.log(`[ndi] started ndi-play for: ${source}`);
+    cmd = 'ndi-play-wrapper'; args = [source];
+    console.log(`[ndi] started for: ${source}`);
   }
-  ndiProcess.on('exit', (code) => { console.log(`[video] player exited (${code})`); ndiProcess = null; });
+  ndiProcess = spawn(cmd, args, { env: { ...process.env, DISPLAY: display }, detached: false });
+  ndiProcess.on('exit', (code) => { console.log(`[video] exited (${code})`); ndiProcess = null; });
 }
 
 function setVnc(sWs) {
