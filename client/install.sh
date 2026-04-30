@@ -58,17 +58,20 @@ case $PKG_MGR in
     apt-get install -y \
       xorg openbox lightdm lightdm-gtk-greeter \
       chromium x11vnc unclutter \
-      ffmpeg curl tar python3 >/dev/null ;;
+      ffmpeg curl tar python3 \
+      network-manager dnsmasq iptables >/dev/null ;;
   dnf)
     dnf install -y \
       xorg-x11-server-Xorg openbox lightdm lightdm-gtk-greeter \
       chromium x11vnc unclutter \
-      ffmpeg curl tar python3 >/dev/null ;;
+      ffmpeg curl tar python3 \
+      NetworkManager dnsmasq iptables >/dev/null ;;
   pacman)
     pacman -S --noconfirm \
       xorg-server openbox lightdm lightdm-gtk-greeter \
       chromium x11vnc unclutter \
-      ffmpeg curl tar python >/dev/null ;;
+      ffmpeg curl tar python \
+      networkmanager dnsmasq iptables >/dev/null ;;
 esac
 
 # Detect chromium binary name
@@ -115,8 +118,77 @@ mkdir -p "$INSTALL_DIR"
 curl -fsSL --max-time 120 "${SERVER_URL}/client.tar.gz" | tar -xz -C "$INSTALL_DIR"
 cd "$INSTALL_DIR" && npm install --production --silent 2>/dev/null
 
+# ── NetworkManager + captive portal DNS ──────────────────────────────────────
+echo "[8] Configuring NetworkManager..."
+systemctl enable NetworkManager 2>/dev/null || true
+systemctl start NetworkManager 2>/dev/null || true
+mkdir -p /etc/NetworkManager/dnsmasq-shared.d
+cat > /etc/NetworkManager/dnsmasq-shared.d/captive.conf << 'NMCONF'
+# Redirect all DNS to the AP IP when in shared (hotspot) mode — triggers
+# iOS/Android captive portal detection popup automatically.
+address=/#/192.168.4.1
+NMCONF
+
+# ── Root helper scripts ────────────────────────────────────────────────────────
+echo "[9] Installing WiFi helper scripts..."
+
+cat > /usr/local/bin/frc-ap-start << 'SCRIPT'
+#!/bin/bash
+# frc-ap-start {pin} {iface} — create open WiFi AP for provisioning
+PIN="$1"; IFACE="$2"
+nmcli con delete "frc-provision" 2>/dev/null || true
+nmcli con add type wifi ifname "$IFACE" con-name "frc-provision" \
+  ssid "FRC-Display-${PIN}" \
+  802-11-wireless.mode ap \
+  802-11-wireless-security.key-mgmt none \
+  ipv4.method shared \
+  ipv4.addresses "192.168.4.1/24"
+nmcli con up "frc-provision"
+# Redirect port 80 → 3000 for captive portal
+iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 -j REDIRECT --to-port 3000 2>/dev/null || true
+SCRIPT
+chmod 755 /usr/local/bin/frc-ap-start
+
+cat > /usr/local/bin/frc-ap-stop << 'SCRIPT'
+#!/bin/bash
+# frc-ap-stop {iface} — tear down WiFi AP
+IFACE="$1"
+iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 -j REDIRECT --to-port 3000 2>/dev/null || true
+nmcli con down "frc-provision" 2>/dev/null || true
+nmcli con delete "frc-provision" 2>/dev/null || true
+SCRIPT
+chmod 755 /usr/local/bin/frc-ap-stop
+
+cat > /usr/local/bin/frc-wifi-connect << 'SCRIPT'
+#!/bin/bash
+# frc-wifi-connect {ssid} {password} — connect to WiFi (empty password = open network)
+SSID="$1"; PASS="$2"
+nmcli device wifi rescan 2>/dev/null || true
+if [ -z "$PASS" ]; then
+  nmcli device wifi connect "$SSID"
+else
+  nmcli device wifi connect "$SSID" password "$PASS"
+fi
+SCRIPT
+chmod 755 /usr/local/bin/frc-wifi-connect
+
+cat > /usr/local/bin/frc-install << SCRIPT
+#!/bin/bash
+# frc-install — re-apply install.sh after an update
+SERVER_URL="\${SERVER_URL:-${SERVER_URL}}"
+curl -fsSL "\${SERVER_URL}/install.sh" | SERVICE_USER="${SERVICE_USER}" INSTALL_DIR="${INSTALL_DIR}" bash
+SCRIPT
+chmod 755 /usr/local/bin/frc-install
+
+# ── Sudoers for WiFi helpers ───────────────────────────────────────────────────
+echo "[10] Configuring sudoers..."
+cat > /etc/sudoers.d/frc-display << SUDOCONF
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-install, /bin/systemctl restart lightdm
+SUDOCONF
+chmod 440 /etc/sudoers.d/frc-display
+
 # ── ndi-list-sources stub ─────────────────────────────────────────────────────
-echo "[8] Installing ndi-list-sources stub..."
+echo "[11] Installing ndi-list-sources stub..."
 cat > /usr/local/bin/ndi-list-sources << 'NDISCRIPT'
 #!/bin/bash
 if command -v ndi-directory-service &>/dev/null; then
@@ -130,7 +202,7 @@ NDISCRIPT
 chmod +x /usr/local/bin/ndi-list-sources
 
 # ── Systemd service ────────────────────────────────────────────────────────────
-echo "[9] Installing systemd service..."
+echo "[12] Installing systemd service..."
 # Get UID for XDG_RUNTIME_DIR
 SERVICE_UID=$(id -u "$SERVICE_USER")
 cat > /etc/systemd/system/display-daemon.service << EOF
@@ -163,7 +235,7 @@ systemctl daemon-reload
 systemctl enable display-daemon.service
 
 # ── Graphical target ───────────────────────────────────────────────────────────
-echo "[10] Setting graphical boot target..."
+echo "[13] Setting graphical boot target..."
 systemctl set-default graphical.target
 
 echo ""
