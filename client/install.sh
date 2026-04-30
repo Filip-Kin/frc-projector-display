@@ -115,7 +115,7 @@ ${CHROMIUM_BIN} --kiosk --no-sandbox --disable-infobars \\
   --no-first-run --disable-default-apps \\
   --autoplay-policy=no-user-gesture-required \\
   --remote-debugging-port=9222 \\
-  http://localhost:3000/ &
+  about:blank &
 EOF
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${USER_HOME}/.config"
 

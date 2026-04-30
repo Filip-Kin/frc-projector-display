@@ -5,9 +5,8 @@ import { cdpNavigate } from './cdp.js';
 import { setHome, setChromium, setNdi, setVnc, startX11vncDaemon, setPin } from './modes.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
-import { hasDefaultRoute } from './wifi.js';
+import { checkInternet } from './wifi.js';
 import { localServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
-import { getNdiSources } from './ndi.js';
 import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -162,7 +161,8 @@ function connectToServer() {
       state.networkCheckTimer = setTimeout(async () => {
         state.networkCheckTimer = null;
         if (state.apMode || state.serverWs?.readyState === WebSocket.OPEN) return;
-        if (!(await hasDefaultRoute())) await enterApMode();
+        const { online } = await checkInternet();
+        if (!online) await enterApMode();
       }, 30000);
     }
   });
@@ -199,14 +199,17 @@ async function runNetworkStartup() {
         log('error', `[net] static IP failed: ${err.message}`);
       }
     } else if (status.hasRoutableIp) {
-      log('info', `[net] ethernet OK: ${status.ip}`);
-      return; // Already have a routable IP, nothing to do
+      log('info', `[net] ethernet has IP: ${status.ip} — checking internet`);
+      // Don't return early — a routable IP doesn't mean internet is reachable
+      // (e.g. field network with no WAN). Fall through to internet check.
     }
   }
 
-  // Final check — if still no default route, enter AP mode
-  if (!state.wsEverConnected && !(await hasDefaultRoute())) {
-    await enterApMode();
+  // Check actual internet reachability — a default route to a local gateway
+  // that has no WAN (common on FRC field networks) still needs AP fallback.
+  if (!state.wsEverConnected) {
+    const { online } = await checkInternet();
+    if (!online) await enterApMode();
   }
 }
 
