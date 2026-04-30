@@ -228,8 +228,10 @@ startX11vncDaemon();
 
 localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
   log('info', `[daemon] local server on port ${LOCAL_PORT}`);
-  // Start on the connecting screen — navigate to home only once WS connects
-  setTimeout(() => cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`), 3000);
+  // Show connecting screen if WS hasn't already connected within 3s
+  setTimeout(() => {
+    if (!state.wsEverConnected) cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`);
+  }, 3000);
 });
 
 connectToServer();
