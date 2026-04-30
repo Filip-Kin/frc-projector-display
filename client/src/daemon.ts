@@ -101,9 +101,6 @@ function connectToServer() {
           state.serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
         break;
       }
-      case 'start_vnc_bridge':
-        setVnc(state.serverWs!);
-        break;
       case 'set_audio_output':
         if (msg.sink) execFile('pactl', ['set-default-sink', msg.sink], { env: process.env }, () => {});
         break;

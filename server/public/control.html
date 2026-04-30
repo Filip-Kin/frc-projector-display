@@ -213,7 +213,6 @@
 <div class="status-bar">
   <div class="dot" id="status-dot"></div>
   <span id="status-text" style="flex:1">Not connected</span>
-  <button id="vnc-quick-btn" class="secondary" onclick="openVnc()" style="display:none;padding:7px 12px;font-size:0.82rem">🖥 VNC</button>
 </div>
 
 <div id="control-section">
@@ -237,24 +236,19 @@
     <div class="mode-btn" id="mode-url" onclick="selectMode('url')">
       <span class="icon">🌐</span>Custom URL
     </div>
-    <div class="mode-btn" id="mode-vnc" onclick="openVnc()">
-      <span class="icon">🖥️</span>Web VNC
-    </div>
     <div class="mode-btn" id="mode-fta" onclick="selectMode('fta')" style="opacity:0.4;cursor:not-allowed">
       <span class="icon">🤖</span>FTA Buddy<br><small>(soon)</small>
     </div>
   </div>
 
-  <!-- NDI / SRT config -->
+  <!-- NDI / OMT config -->
   <div class="mode-config" id="config-ndi">
-    <label>NDI Source <span style="color:#555;font-weight:400">(LAN)</span></label>
+    <label>Video Source</label>
     <div style="display:flex;gap:8px">
       <select id="ndi-source-select" style="flex:1">
         <option value="">-- refreshing sources… --</option>
       </select>
     </div>
-    <label style="margin-top:10px">SRT Stream URL <span style="color:#555;font-weight:400">(open standard, LAN + WAN)</span></label>
-    <input type="text" id="srt-url" placeholder="srt://192.168.1.x:1234" autocomplete="off">
     <div class="apply-row">
       <button onclick="applyMode()">Apply</button>
     </div>
@@ -335,7 +329,7 @@ function saveRecentPin(pin) {
   let recents = JSON.parse(localStorage.getItem('recentPins') || '[]');
   recents = recents.filter(r => r.pin !== pin);
   recents.unshift({ pin, lastUsed: Date.now() });
-  recents = recents.slice(0, 10);
+  recents = recents.slice(0, 3);
   localStorage.setItem('recentPins', JSON.stringify(recents));
   renderRecentPins();
 }
@@ -390,13 +384,11 @@ function connect() {
       saveRecentPin(pin);
       setStatus('online', `Connected · PIN ${pin}`);
       document.getElementById('control-section').style.display = 'block';
-      document.getElementById('vnc-quick-btn').style.display = '';
       if (msg.ndiSources) updateNdiSources(msg.ndiSources);
       if (msg.audioSinks) updateAudioSinks(msg.audioSinks, msg.audioState);
     } else if (msg.type === 'device_disconnected') {
       setStatus('offline', `Waiting for device (PIN: ${pin})`);
       document.getElementById('control-section').style.display = 'none';
-      document.getElementById('vnc-quick-btn').style.display = 'none';
     } else if (msg.type === 'ndi_sources') {
       updateNdiSources(msg.sources);
     } else if (msg.type === 'audio_sinks') {
@@ -576,14 +568,6 @@ function toggleMute() {
   isMuted = !isMuted;
   document.getElementById('mute-btn').textContent = isMuted ? '🔇' : '🔊';
   sendMsg({ type: 'set_mute', muted: isMuted });
-}
-
-// ── VNC (always-on: opens without changing display mode) ──────────────────────
-
-function openVnc() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
-  sendMsg({ type: 'start_vnc_bridge' });
-  window.open(`/vnc/${currentPin}`, '_blank');
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────

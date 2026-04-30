@@ -95,17 +95,32 @@ export function handleController(ws: WebSocket, rawPin: string) {
   ws.on('close', () => { if (controllers.get(pin) === ws) controllers.delete(pin); });
 }
 
+// Buffers VNC data until the browser client connects — VNC sends its
+// protocol handshake immediately on connection; if we don't buffer it,
+// a client that connects after the upstream will miss the greeting.
+const vncUpstreamBuffer = new Map<string, Buffer[]>();
+
 export function handleVncUpstream(ws: WebSocket, rawPin: string) {
   const pin = rawPin.toUpperCase();
   vncUpstream.set(pin, ws);
+  vncUpstreamBuffer.set(pin, []);
   console.log(`[vnc-upstream] connected for PIN ${pin}`);
 
-  ws.on('message', (data) => {
+  ws.on('message', (data: Buffer) => {
     const client = vncClients.get(pin);
-    if (client?.readyState === WebSocket.OPEN) client.send(data);
+    if (client?.readyState === WebSocket.OPEN) {
+      client.send(data);
+    } else {
+      // Buffer until client arrives (cap at 256 KB to avoid runaway growth)
+      const buf = vncUpstreamBuffer.get(pin)!;
+      buf.push(Buffer.from(data));
+      const total = buf.reduce((s, b) => s + b.length, 0);
+      if (total > 256 * 1024) { buf.splice(0, Math.ceil(buf.length / 2)); }
+    }
   });
   ws.on('close', () => {
     vncUpstream.delete(pin);
+    vncUpstreamBuffer.delete(pin);
     const client = vncClients.get(pin);
     if (client?.readyState === WebSocket.OPEN) client.close();
   });
@@ -115,6 +130,13 @@ export function handleVncClient(ws: WebSocket, rawPin: string) {
   const pin = rawPin.toUpperCase();
   vncClients.set(pin, ws);
   console.log(`[vnc-client] connected for PIN ${pin}`);
+
+  // Flush any buffered upstream data so the client gets the VNC greeting
+  const buf = vncUpstreamBuffer.get(pin);
+  if (buf?.length) {
+    for (const chunk of buf) ws.send(chunk);
+    vncUpstreamBuffer.set(pin, []);
+  }
 
   ws.on('message', (data) => {
     const up = vncUpstream.get(pin);

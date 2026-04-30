@@ -38,10 +38,7 @@ export function setNdi(source: string) {
   const display = process.env.DISPLAY ?? ':0';
   let cmd: string; let args: string[];
 
-  if (source.startsWith('srt://')) {
-    cmd = 'ffplay'; args = [source, '-fs', '-loglevel', 'quiet'];
-    console.log(`[srt] started for: ${source}`);
-  } else if (source.startsWith('omt://')) {
+  if (source.startsWith('omt://')) {
     cmd = 'omt-play-wrapper'; args = [source];
     console.log(`[omt] started for: ${source}`);
   } else {

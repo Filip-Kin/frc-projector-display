@@ -57,7 +57,8 @@ case $PKG_MGR in
       chromium x11vnc unclutter \
       ffmpeg curl tar python3 \
       network-manager dnsmasq iptables \
-      avahi-utils >/dev/null ;;
+      avahi-utils \
+      pipewire pipewire-pulse wireplumber pulseaudio-utils >/dev/null ;;
   dnf)
     dnf install -y \
       xorg-x11-server-Xorg openbox lightdm lightdm-gtk-greeter \
@@ -217,7 +218,7 @@ echo "[11] Installing NDI tools..."
 cat > /usr/local/bin/ndi-list-sources << 'NDISCRIPT'
 #!/bin/bash
 python3 << 'PYEOF'
-import json, subprocess
+import json, re, subprocess
 
 def avahi(svc):
     try:
@@ -227,12 +228,16 @@ def avahi(svc):
     except:
         return []
 
+def unescape(s):
+    # avahi -p uses decimal escapes: \032 = chr(32) = space, etc.
+    return re.sub(r'\\(\d+)', lambda m: chr(int(m.group(1))), s).strip('"')
+
 # NDI sources (plain strings — ndi-play-wrapper takes the source name directly)
 ndi, seen = [], set()
 for line in avahi('_ndi._tcp'):
     p = line.split(';')
     if len(p) >= 5 and p[0] == '=':
-        name = p[4].strip('"')
+        name = unescape(p[4])
         if name and name not in seen:
             seen.add(name); ndi.append(name)
 
@@ -241,12 +246,12 @@ omt, seen = [], set()
 for line in avahi('_omt._tcp'):
     p = line.split(';')
     if len(p) >= 9 and p[0] == '=':
-        name = p[4].strip('"')
+        name = unescape(p[4])
         addr, port = p[7], p[8].strip()
         key = f"{addr}:{port}"
         if key and key not in seen:
             seen.add(key)
-            omt.append({"label": f"OMT: {name} ({addr}:{port})", "value": f"omt://{addr}:{port}"})
+            omt.append({"label": f"OMT: {name}", "value": f"omt://{addr}:{port}"})
 
 print(json.dumps(ndi + omt))
 PYEOF
