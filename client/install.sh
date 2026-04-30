@@ -175,10 +175,33 @@ curl -fsSL "\${SERVER_URL}/install.sh" | SERVICE_USER="${SERVICE_USER}" INSTALL_
 SCRIPT
 chmod 755 /usr/local/bin/frc-install
 
-# ── Sudoers for WiFi helpers ───────────────────────────────────────────────────
+cat > /usr/local/bin/frc-eth-static << 'SCRIPT'
+#!/bin/bash
+# frc-eth-static {iface} {ip} {prefix} {gateway}
+# Sets a static IP on ethernet using nmcli, replacing any existing connection.
+IFACE="$1"; IP="$2"; PREFIX="${3:-24}"; GW="${4:-}"
+nmcli con delete "frc-eth-static" 2>/dev/null || true
+ARGS=(con add type ethernet ifname "$IFACE" con-name "frc-eth-static" \
+  ipv4.method manual ipv4.addresses "${IP}/${PREFIX}")
+[ -n "$GW" ] && ARGS+=(ipv4.gateway "$GW")
+nmcli "${ARGS[@]}"
+nmcli con up "frc-eth-static"
+SCRIPT
+chmod 755 /usr/local/bin/frc-eth-static
+
+cat > /usr/local/bin/frc-eth-dhcp << 'SCRIPT'
+#!/bin/bash
+# frc-eth-dhcp {iface} — remove static config and re-enable DHCP
+IFACE="$1"
+nmcli con delete "frc-eth-static" 2>/dev/null || true
+nmcli dev connect "$IFACE" 2>/dev/null || true
+SCRIPT
+chmod 755 /usr/local/bin/frc-eth-dhcp
+
+# ── Sudoers for WiFi + ethernet helpers ───────────────────────────────────────
 echo "[10] Configuring sudoers..."
 cat > /etc/sudoers.d/frc-display << SUDOCONF
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-install, /bin/systemctl restart lightdm
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /bin/systemctl restart lightdm
 SUDOCONF
 chmod 440 /etc/sudoers.d/frc-display
 

@@ -6,6 +6,7 @@ import { exec } from 'child_process';
 import { state } from './state.js';
 import { cdpNavigate } from './cdp.js';
 import { stopAp, startAp, connectWifi, scanWifi, checkInternet } from './wifi.js';
+import { getEthernetInterface, getEthernetStatus, applyDhcp, applyCustomStaticIp } from './network.js';
 import { setHome } from './modes.js';
 
 export const LOCAL_PORT = parseInt(process.env.LOCAL_PORT ?? '3000', 10);
@@ -51,6 +52,31 @@ app.get('/youtube', (req, res) => {
 });
 
 app.get('/api/wifi-scan', async (_req, res) => res.json(await scanWifi().catch(() => [])));
+
+app.get('/api/eth-status', async (_req, res) => {
+  const iface = await getEthernetInterface();
+  if (!iface) { res.json({ iface: null }); return; }
+  const status = await getEthernetStatus(iface);
+  res.json(status);
+});
+
+app.post('/api/eth-config', async (req, res) => {
+  const { mode, ip, prefix, gateway } = req.body as { mode: string; ip?: string; prefix?: string; gateway?: string };
+  const iface = await getEthernetInterface();
+  if (!iface) { res.status(400).json({ error: 'No ethernet interface found' }); return; }
+  try {
+    if (mode === 'dhcp') {
+      await applyDhcp(iface);
+      res.json({ ok: true, message: 'DHCP enabled — reconnecting…' });
+    } else {
+      if (!ip) { res.status(400).json({ error: 'IP required for static mode' }); return; }
+      await applyCustomStaticIp(iface, ip, prefix ?? '24', gateway ?? '');
+      res.json({ ok: true, message: `Static IP ${ip} applied` });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get('/api/internet-status', async (_req, res) => {
   const result = await checkInternet();
@@ -199,6 +225,20 @@ function buildSetupPage(networks: { ssid: string; signal: number; secured: boole
 <div class="pw-row"><input type="password" id="password" placeholder="Password"><button class="pw-toggle" onclick="togglePw()" type="button">Show</button></div>
 <button class="connect" onclick="doConnect()">Connect</button>
 <div id="status"></div>
+<hr style="border:none;border-top:1px solid #222;margin:24px 0">
+<div class="section-title">Ethernet (AV Network / No DHCP)</div>
+<div id="eth-status" style="font-size:.82rem;color:#555;margin-bottom:10px">Checking…</div>
+<div style="display:flex;gap:8px;margin-bottom:10px">
+  <button id="btn-dhcp" onclick="setEthMode('dhcp')" style="flex:1;background:#252525;color:#ccc;padding:9px;font-size:.85rem">DHCP</button>
+  <button id="btn-static" onclick="setEthMode('static')" style="flex:1;background:#252525;color:#ccc;padding:9px;font-size:.85rem">Static IP</button>
+</div>
+<div id="eth-static-fields" style="display:none">
+  <label>IP Address</label><input type="text" id="eth-ip" placeholder="192.168.25.xxx">
+  <label>Prefix length</label><input type="text" id="eth-prefix" placeholder="24" value="24">
+  <label>Gateway <span style="color:#555">(leave blank if none)</span></label><input type="text" id="eth-gw" placeholder="192.168.25.1">
+  <button class="connect" style="background:#4af;margin-top:12px" onclick="applyEth()">Apply Static IP</button>
+</div>
+<div id="eth-status2"></div>
 <script>
 function selectNetwork(ssid){document.getElementById('ssid').value=ssid;document.getElementById('password').focus()}
 function togglePw(){const i=document.getElementById('password');const b=event.target;i.type=i.type==='password'?'text':'password';b.textContent=i.type==='password'?'Show':'Hide'}
@@ -206,6 +246,11 @@ async function refreshScan(){const l=document.getElementById('net-list');l.inner
 function setStatus(cls,msg){const e=document.getElementById('status');e.className=cls;e.innerHTML=msg}
 async function doConnect(){const ssid=document.getElementById('ssid').value.trim();if(!ssid){setStatus('error','Enter a network name');return}const password=document.getElementById('password').value;setStatus('info','<span class="spinner">⟳</span> Connecting to <b>'+ssid+'</b>…');document.querySelector('.connect').disabled=true;try{const r=await fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password})}).then(r=>r.json());if(r.status==='online'||r.status==='connected'){setStatus('success','✓ Connected! Display restarting…')}else if(r.status==='captive_portal'){setStatus('info','⚠ Venue requires sign-in. Use <a class="vnc-link" href="/vnc/'+r.pin+'" target="_blank">Web VNC</a> to sign in, then <button onclick="pollInternet()" style="margin-top:8px;background:#fa0;color:#000;border:none;border-radius:6px;padding:8px 16px;cursor:pointer">I signed in — continue</button>')}else{setStatus('error',r.message||'Connection failed');document.querySelector('.connect').disabled=false}}catch(e){setStatus('error','Request failed — try again');document.querySelector('.connect').disabled=false}}
 async function pollInternet(){setStatus('info','<span class="spinner">⟳</span> Checking internet…');for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,2000));const r=await fetch('/api/internet-status').then(r=>r.json()).catch(()=>({}));if(r.online||r.status==='proceeding'){setStatus('success','✓ Connected!');return}}setStatus('error','Still no internet. Try again.')}
+let ethMode='dhcp';
+function setEthMode(m){ethMode=m;document.getElementById('btn-dhcp').style.background=m==='dhcp'?'#333':'#252525';document.getElementById('btn-static').style.background=m==='static'?'#333':'#252525';document.getElementById('eth-static-fields').style.display=m==='static'?'block':'none'}
+async function applyEth(){const ip=document.getElementById('eth-ip').value.trim();const prefix=document.getElementById('eth-prefix').value.trim()||'24';const gw=document.getElementById('eth-gw').value.trim();if(!ip){document.getElementById('eth-status2').innerHTML='<span style="color:#f66">Enter an IP address</span>';return}const r=await fetch('/api/eth-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'static',ip,prefix,gateway:gw})}).then(r=>r.json()).catch(()=>({error:'Request failed'}));document.getElementById('eth-status2').innerHTML=r.ok?'<span style="color:#6f6">✓ '+r.message+'</span>':'<span style="color:#f66">'+r.error+'</span>'}
+async function loadEthStatus(){const s=await fetch('/api/eth-status').then(r=>r.json()).catch(()=>({}));if(!s.iface){document.getElementById('eth-status').textContent='No ethernet adapter detected';return}const ip=s.ip||'No IP';const note=s.isLinkLocal?' (DHCP failed — link-local)':s.hasRoutableIp?' (connected)':' (no IP)';document.getElementById('eth-status').textContent=s.iface+': '+ip+note;if(s.ip)document.getElementById('eth-ip').value=s.ip}
+loadEthStatus();setEthMode('dhcp');
 </script>
 </body></html>`;
 }

@@ -8,6 +8,7 @@ import { getNdiSources } from './ndi.js';
 import { hasDefaultRoute } from './wifi.js';
 import { localServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
 import { getNdiSources } from './ndi.js';
+import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const VERSION      = (await import('../package.json')).version;
@@ -137,6 +138,42 @@ function connectToServer() {
 }
 
 
+// ── Network startup sequence ──────────────────────────────────────────────────
+// 1. NM handles DHCP automatically — wait 15s for it to settle
+// 2. If ethernet is link-local (169.254.x.x) → DHCP failed → try random static IP
+// 3. After 20s total, if still no default route → AP mode
+// NM also auto-connects saved WiFi during this window.
+
+async function runNetworkStartup() {
+  // Wait for DHCP
+  await new Promise(r => setTimeout(r, 15000));
+  if (state.wsEverConnected) return;
+
+  const ethIface = await getEthernetInterface();
+  if (ethIface) {
+    const status = await getEthernetStatus(ethIface);
+    if (status.isLinkLocal) {
+      log('warn', `[net] DHCP failed on ${ethIface} (got ${status.ip}) — trying field static IP`);
+      try {
+        const ip = await applyFieldStaticIp(ethIface);
+        log('info', `[net] static IP applied: ${ip}`);
+        // Give the route a moment to settle
+        await new Promise(r => setTimeout(r, 3000));
+      } catch (err: any) {
+        log('error', `[net] static IP failed: ${err.message}`);
+      }
+    } else if (status.hasRoutableIp) {
+      log('info', `[net] ethernet OK: ${status.ip}`);
+      return; // Already have a routable IP, nothing to do
+    }
+  }
+
+  // Final check — if still no default route, enter AP mode
+  if (!state.wsEverConnected && !(await hasDefaultRoute())) {
+    await enterApMode();
+  }
+}
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 startX11vncDaemon();
 
@@ -145,10 +182,5 @@ localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
   setTimeout(() => cdpNavigate(`http://localhost:${LOCAL_PORT}/`), 3000);
 });
 
-const apCheckTimer = setTimeout(async () => {
-  if (state.wsEverConnected) return;
-  if (await hasDefaultRoute()) return;
-  await enterApMode();
-}, 20000);
-
 connectToServer();
+runNetworkStartup();
