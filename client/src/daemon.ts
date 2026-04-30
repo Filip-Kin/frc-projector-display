@@ -5,7 +5,15 @@ import { cdpNavigate } from './cdp.js';
 import { setHome, setChromium, setNdi, setVnc, startX11vncDaemon, setPin } from './modes.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
-import { checkInternet } from './wifi.js';
+import { exec } from 'child_process';
+
+// Check reachability of the display server specifically — that's what matters.
+// Returns true if the server responds to any HTTP request.
+function checkServerReachable(): Promise<boolean> {
+  return new Promise(resolve => {
+    exec(`curl -sf --max-time 8 --head '${SERVER_BASE}' 2>/dev/null`, (err) => resolve(!err));
+  });
+}
 import { localServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
 import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
 
@@ -161,8 +169,7 @@ function connectToServer() {
       state.networkCheckTimer = setTimeout(async () => {
         state.networkCheckTimer = null;
         if (state.apMode || state.serverWs?.readyState === WebSocket.OPEN) return;
-        const { online } = await checkInternet();
-        if (!online) await enterApMode();
+        if (!(await checkServerReachable())) await enterApMode();
       }, 30000);
     }
   });
