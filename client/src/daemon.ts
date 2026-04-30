@@ -3,7 +3,7 @@ import { execFile } from 'child_process';
 import { state } from './state.js';
 import { cdpNavigate } from './cdp.js';
 import { setHome, setChromium, setNdi, setVnc, startX11vncDaemon, setPin } from './modes.js';
-import { getAudioSinks, getAudioState } from './audio.js';
+import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
 import { hasDefaultRoute } from './wifi.js';
 import { localServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
@@ -105,7 +105,15 @@ function connectToServer() {
         state.currentMode = msg.mode;
         if (msg.mode === 'home')                         await setHome();
         else if (msg.mode === 'chromium' && msg.url)    await setChromium(msg.url);
-        else if (msg.mode === 'ndi'      && msg.source) setNdi(msg.source);
+        else if (msg.mode === 'ndi' && msg.source) {
+          if ((msg.source as string).startsWith('omt://')) {
+            // OMT playback not yet functional — notify controller
+            if (state.serverWs?.readyState === WebSocket.OPEN)
+              state.serverWs.send(JSON.stringify({ type: 'error', message: 'OMT playback is not yet supported on Linux. NDI from the same source works fine.' }));
+          } else {
+            setNdi(msg.source, msg.bandwidth ?? 'high');
+          }
+        }
         else if (msg.mode === 'vnc')                    setVnc(state.serverWs!);
         break;
       case 'refresh_ndi': {
@@ -122,7 +130,15 @@ function connectToServer() {
         setTimeout(() => { if (state.serverWs?.readyState === WebSocket.OPEN) setVnc(state.serverWs!); }, 500);
         break;
       case 'set_audio_output':
-        if (msg.sink) execFile('pactl', ['set-default-sink', msg.sink], { env: process.env }, () => {});
+        if (msg.sink) {
+          setAudioOutput(msg.sink).then(async () => {
+            // Re-send updated sinks after profile switch
+            const sinks = await getAudioSinks();
+            const astState = await getAudioState();
+            if (state.serverWs?.readyState === WebSocket.OPEN)
+              state.serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state: astState }));
+          }).catch(() => {});
+        }
         break;
       case 'set_volume': {
         const vol = Math.max(0, Math.min(100, parseInt(msg.volume) || 0));

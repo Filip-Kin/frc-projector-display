@@ -247,6 +247,11 @@
         <option value="">-- refreshing sources… --</option>
       </select>
     </div>
+    <label style="margin-top:10px">Quality</label>
+    <select id="ndi-bandwidth">
+      <option value="high">High quality (NDI full)</option>
+      <option value="low">Low bandwidth (NDI proxy)</option>
+    </select>
     <div class="apply-row">
       <button onclick="applyMode()">Apply</button>
     </div>
@@ -449,7 +454,12 @@ function applyMode() {
     case 'ndi': {
       const src = document.getElementById('ndi-source-select').value;
       if (!src) { toast('Select a video source'); return; }
-      msg = { type: 'set_mode', mode: 'ndi', source: src };
+      const bandwidth = document.getElementById('ndi-bandwidth').value;
+      if (src.startsWith('omt://')) {
+        toast('OMT playback not yet supported — use the NDI source from the same device');
+        return;
+      }
+      msg = { type: 'set_mode', mode: 'ndi', source: src, bandwidth };
       break;
     }
     case 'fim': {
@@ -490,7 +500,11 @@ function applyMode() {
 // ── NDI ───────────────────────────────────────────────────────────────────────
 
 function updateNdiSources(sources) {
-  ndiSources = sources || [];
+  // Filter out OMT sources — playback not yet supported on Linux
+  ndiSources = (sources || []).filter(s => {
+    const val = typeof s === 'object' ? s.value : s;
+    return !val.startsWith('omt://');
+  });
   const sel = document.getElementById('ndi-source-select');
   const prev = sel.value;
   sel.innerHTML = ndiSources.length

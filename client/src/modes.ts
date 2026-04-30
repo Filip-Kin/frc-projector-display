@@ -13,8 +13,13 @@ const WS_URL     = SERVER_URL.replace(/^https?:\/\//, m => m === 'https://' ? 'w
 export let PIN = '';
 export function setPin(p: string) { PIN = p; }
 
-export function stopNdi() {
-  if (state.ndiProcess) { state.ndiProcess.kill('SIGTERM'); state.ndiProcess = null; }
+export async function stopNdi() {
+  if (state.ndiProcess) {
+    const proc = state.ndiProcess;
+    state.ndiProcess = null;
+    try { proc.kill('SIGKILL'); } catch {}   // SIGKILL is immediate — ndi-play needs no cleanup
+    await new Promise(r => setTimeout(r, 200)); // let X11 window close before CDP navigates
+  }
 }
 
 export function stopVnc() {
@@ -23,27 +28,29 @@ export function stopVnc() {
 }
 
 export async function setHome() {
-  stopNdi(); stopVnc();
+  await stopNdi(); stopVnc();
   await cdpNavigate(`http://localhost:${LOCAL_PORT}/`);
 }
 
 export async function setChromium(url: string) {
-  stopNdi(); stopVnc();
+  await stopNdi(); stopVnc();
   await cdpNavigate(url);
 }
 
-export function setNdi(source: string) {
-  stopNdi(); stopVnc();
+export function setNdi(source: string, bandwidth: 'high' | 'low' = 'high') {
+  stopNdi(); stopVnc(); // fire-and-forget for source switches within NDI
   cdpNavigate('about:blank');
   const display = process.env.DISPLAY ?? ':0';
   let cmd: string; let args: string[];
 
   if (source.startsWith('omt://')) {
-    cmd = 'omt-play-wrapper'; args = [source];
-    console.log(`[omt] started for: ${source}`);
+    // omt-play-wrapper uses libomt which is currently non-functional on Linux
+    // Fall back to an error — the daemon will log it and the server will relay
+    console.error(`[omt] playback not yet supported (libomt stub)`);
+    return;
   } else {
-    cmd = 'ndi-play-wrapper'; args = [source];
-    console.log(`[ndi] started for: ${source}`);
+    cmd = 'ndi-play-wrapper'; args = [source, bandwidth];
+    console.log(`[ndi] started for: ${source} (bandwidth: ${bandwidth})`);
   }
 
   state.ndiProcess = spawn(cmd, args, { env: { ...process.env, DISPLAY: display }, detached: false });
