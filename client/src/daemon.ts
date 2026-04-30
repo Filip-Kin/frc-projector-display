@@ -47,7 +47,7 @@ function connectToServer() {
 
   state.serverWs.on('open', async () => {
     state.wsEverConnected = true;
-    clearTimeout(apCheckTimer);
+    if (apCheckTimer) { clearTimeout(apCheckTimer); apCheckTimer = null; }
     clearTimeout(state.networkCheckTimer!);
     state.networkCheckTimer = null;
     log('info', '[ws] connected to server');
@@ -138,6 +138,9 @@ function connectToServer() {
 }
 
 
+// Declared before connectToServer so the open handler can clear it
+let apCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
 // ── Network startup sequence ──────────────────────────────────────────────────
 // 1. NM handles DHCP automatically — wait 15s for it to settle
 // 2. If ethernet is link-local (169.254.x.x) → DHCP failed → try random static IP
@@ -183,4 +186,4 @@ localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
 });
 
 connectToServer();
-runNetworkStartup();
+runNetworkStartup();  // starts after 15s, may enter AP mode if no route
