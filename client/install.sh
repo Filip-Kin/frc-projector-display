@@ -34,11 +34,16 @@ fi
 echo "[1] Package manager: $PKG_MGR"
 
 # ── Bun (JavaScript/TypeScript runtime) ───────────────────────────────────────
+export PATH="/usr/local/bin:$PATH"
 if ! command -v bun &>/dev/null; then
   echo "[2] Installing Bun..."
+  # Ensure unzip is present (Bun installer requires it)
+  case $PKG_MGR in
+    apt)    apt-get install -y unzip >/dev/null ;;
+    dnf)    dnf install -y unzip >/dev/null ;;
+    pacman) pacman -S --noconfirm unzip >/dev/null ;;
+  esac
   curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash >/dev/null 2>&1
-  # Ensure bun is in PATH for subsequent steps
-  export PATH="/usr/local/bin:$PATH"
 else
   echo "[2] Bun $(bun --version) already installed"
 fi

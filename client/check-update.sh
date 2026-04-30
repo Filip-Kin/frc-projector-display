@@ -6,7 +6,7 @@
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/frc-projector-display/client}"
 
-LOCAL=$(node -e "try{process.stdout.write(require('${INSTALL_DIR}/package.json').version)}catch{process.stdout.write('0.0.0')}" 2>/dev/null || echo "0.0.0")
+LOCAL=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/package.json')).get('version','0.0.0'))" 2>/dev/null || echo "0.0.0")
 REMOTE=$(curl -sf --max-time 10 "${SERVER_URL}/version.json" 2>/dev/null \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null || echo "")
 
