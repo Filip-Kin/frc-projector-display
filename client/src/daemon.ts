@@ -5,15 +5,6 @@ import { cdpNavigate } from './cdp.js';
 import { setHome, setChromium, setNdi, setVnc, startX11vncDaemon, setPin } from './modes.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
-import { exec } from 'child_process';
-
-// Check reachability of the display server specifically — that's what matters.
-// Returns true if the server responds to any HTTP request.
-function checkServerReachable(): Promise<boolean> {
-  return new Promise(resolve => {
-    exec(`curl -sf --max-time 8 --head '${SERVER_BASE}' 2>/dev/null`, (err) => resolve(!err));
-  });
-}
 import { localServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
 import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
 
@@ -169,7 +160,8 @@ function connectToServer() {
       state.networkCheckTimer = setTimeout(async () => {
         state.networkCheckTimer = null;
         if (state.apMode || state.serverWs?.readyState === WebSocket.OPEN) return;
-        if (!(await checkServerReachable())) await enterApMode();
+        // WS still not open after 30s of trying → server unreachable → AP mode
+        if (state.serverWs?.readyState !== WebSocket.OPEN) await enterApMode();
       }, 30000);
     }
   });
@@ -212,11 +204,9 @@ async function runNetworkStartup() {
     }
   }
 
-  // Check actual internet reachability — a default route to a local gateway
-  // that has no WAN (common on FRC field networks) still needs AP fallback.
-  if (!state.wsEverConnected) {
-    const { online } = await checkInternet();
-    if (!online) await enterApMode();
+  // WS connection is the ground truth — if it's not up by now, server is unreachable
+  if (!state.wsEverConnected && state.serverWs?.readyState !== WebSocket.OPEN) {
+    await enterApMode();
   }
 }
 
