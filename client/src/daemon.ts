@@ -82,11 +82,14 @@ function connectToServer() {
         state.serverWs.send(JSON.stringify({ type: 'heartbeat', version: VERSION }));
       }
     }, 30000);
-    ndiPollInterval = setInterval(async () => {
+    // Initial scan immediately on connect, then every 20s
+    const sendNdi = async () => {
       const sources = await getNdiSources();
       if (state.serverWs?.readyState === WebSocket.OPEN)
         state.serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
-    }, 20000);
+    };
+    sendNdi();
+    ndiPollInterval = setInterval(sendNdi, 20000);
 
     // Poll for audio sinks — PipeWire starts after the daemon so retry until found
     pollAudioSinks();
