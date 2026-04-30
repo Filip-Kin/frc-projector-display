@@ -43,38 +43,41 @@ export async function getAudioSinks(): Promise<AudioSink[]> {
   });
 }
 
-// Switch card profile (if needed) then set default sink
+// Move all active audio streams to the current default sink
+async function moveAllStreams(): Promise<void> {
+  await new Promise<void>(r => {
+    exec(`pactl list short sink-inputs | awk '{print $1}' | xargs -I{} pactl move-sink-input {} @DEFAULT_SINK@ 2>/dev/null; true`,
+      { env: process.env }, () => r());
+  });
+}
+
+// Switch card profile (if needed), set default sink, then move all streams
 export async function setAudioOutput(sinkName: string): Promise<void> {
   if (sinkName.startsWith(PROFILE_PREFIX)) {
     const rest = sinkName.slice(PROFILE_PREFIX.length);
-    // rest = "alsa_card.pci-0000_00_1b.0:output:hdmi-stereo+input:analog-stereo"
     const colonIdx = rest.indexOf(':output:');
     if (colonIdx === -1) return;
     const card = rest.slice(0, colonIdx);
     const profile = rest.slice(colonIdx + 1);
-    // Switch profile
     await new Promise<void>(r => exec(`pactl set-card-profile '${card}' '${profile}'`, { env: process.env }, () => r()));
     await new Promise(r => setTimeout(r, 600));
-    // Get the new default sink (first sink matching the PCI id of this card)
     const pciId = card.replace('alsa_card.', '');
     const newSink = await new Promise<string>(r => {
       exec(`pactl list short sinks | grep '${pciId}' | head -1 | awk '{print $2}'`, { env: process.env }, (_e, out) => r(out.trim()));
     });
     if (newSink) {
       await new Promise<void>(r => exec(`pactl set-default-sink '${newSink}'`, { env: process.env }, () => r()));
+      await moveAllStreams();
     }
   } else {
-    // Direct sink selection — also switch back to analog profile if currently on HDMI
     const pciId = sinkName.replace('alsa_output.', '').replace(/\.[^.]+$/, '');
     const card = `alsa_card.${pciId}`;
-    const isAnalog = sinkName.includes('analog');
-    if (isAnalog) {
-      await new Promise<void>(r => exec(`pactl set-card-profile '${card}' 'output:analog-stereo+input:analog-stereo' 2>/dev/null || true`, { env: process.env }, () => r()));
+    if (sinkName.includes('analog')) {
+      await new Promise<void>(r => exec(`pactl set-card-profile '${card}' 'output:analog-stereo+input:analog-stereo' 2>/dev/null; true`, { env: process.env }, () => r()));
       await new Promise(r => setTimeout(r, 400));
-      await new Promise<void>(r => exec(`pactl set-default-sink '${sinkName}'`, { env: process.env }, () => r()));
-    } else {
-      await new Promise<void>(r => exec(`pactl set-default-sink '${sinkName}'`, { env: process.env }, () => r()));
     }
+    await new Promise<void>(r => exec(`pactl set-default-sink '${sinkName}'`, { env: process.env }, () => r()));
+    await moveAllStreams();
   }
 }
 
