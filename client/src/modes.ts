@@ -53,8 +53,13 @@ export function setNdi(source: string, bandwidth: 'high' | 'low' = 'high') {
     console.log(`[ndi] started for: ${source} (bandwidth: ${bandwidth})`);
   }
 
-  state.ndiProcess = spawn(cmd, args, { env: { ...process.env, DISPLAY: display }, detached: false });
-  state.ndiProcess.on('exit', code => { console.log(`[video] exited (${code})`); state.ndiProcess = null; });
+  const proc = spawn(cmd, args, { env: { ...process.env, DISPLAY: display }, detached: false });
+  proc.on('exit', code => {
+    console.log(`[video] exited (${code})`);
+    // Only clear if this is still the current process — prevents orphan races
+    if (state.ndiProcess === proc) state.ndiProcess = null;
+  });
+  state.ndiProcess = proc;
 }
 
 export function setVnc(serverWs: WebSocket) {

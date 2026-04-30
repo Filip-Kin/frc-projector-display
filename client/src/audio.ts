@@ -1,42 +1,39 @@
 import { exec } from 'child_process';
 
-export interface AudioSink { name: string; description: string; profile?: string; card?: string; }
+export interface AudioSink { name: string; description: string; }
 export interface AudioState { sink: string; volume: number; muted: boolean; }
 
-// Returns active sinks plus available HDMI outputs from inactive card profiles
-export function getAudioSinks(): Promise<AudioSink[]> {
+// Virtual prefix for card-profile-based outputs not in the current active profile
+const PROFILE_PREFIX = 'profile:';
+
+export async function getAudioSinks(): Promise<AudioSink[]> {
   return new Promise((resolve) => {
     exec('pactl list sinks && echo "---CARDS---" && pactl list cards', { env: process.env }, (err, stdout) => {
       if (err) { resolve([]); return; }
-      const [sinksRaw, cardsRaw] = stdout.split('---CARDS---');
+      const [sinksRaw, cardsRaw = ''] = stdout.split('---CARDS---');
       const sinks: AudioSink[] = [];
 
-      // Active sinks
+      // Active sinks from current profile
       for (const block of sinksRaw.split(/^Sink #/m).slice(1)) {
         const name = block.match(/\tName:\s*(.+)/)?.[1]?.trim();
         const desc = block.match(/\tDescription:\s*(.+)/)?.[1]?.trim();
         if (name) sinks.push({ name, description: desc ?? name });
       }
 
-      // Add HDMI outputs from inactive profiles
-      if (cardsRaw) {
+      // Look for HDMI profiles that aren't currently active
+      const activeHdmi = sinks.some(s => s.name.includes('hdmi'));
+      if (!activeHdmi) {
         for (const cardBlock of cardsRaw.split(/^Card #/m).slice(1)) {
           const cardName = cardBlock.match(/\tName:\s*(.+)/)?.[1]?.trim();
-          const activeProfile = cardBlock.match(/Active Profile:\s*(.+)/)?.[1]?.trim();
           if (!cardName) continue;
-
-          // Find HDMI profiles not currently active
-          const profileMatches = [...cardBlock.matchAll(/\t\t(.+?):\s.*\(sinks: \d+.*\)/g)];
-          for (const pm of profileMatches) {
-            const profName = pm[1].trim();
-            if (!profName.includes('hdmi') && !profName.includes('HDMI')) continue;
-            if (profName === activeProfile) continue;
-            // Virtual sink entry for this profile
-            const label = profName.includes('hdmi-stereo') ? 'HDMI / DisplayPort' : `HDMI (${profName})`;
-            const virtualName = `profile:${cardName}:${profName}`;
-            if (!sinks.some(s => s.name === virtualName)) {
-              sinks.push({ name: virtualName, description: label, profile: profName, card: cardName });
-            }
+          // Use the HDMI+analog profile (keeps analog input) as preferred
+          const preferred = 'output:hdmi-stereo+input:analog-stereo';
+          if (cardBlock.includes(preferred)) {
+            sinks.push({
+              name: `${PROFILE_PREFIX}${cardName}:${preferred}`,
+              description: 'HDMI / DisplayPort',
+            });
+            break; // only one HDMI option per card
           }
         }
       }
@@ -46,30 +43,38 @@ export function getAudioSinks(): Promise<AudioSink[]> {
   });
 }
 
-// Switch card profile if needed, then set default sink
+// Switch card profile (if needed) then set default sink
 export async function setAudioOutput(sinkName: string): Promise<void> {
-  if (sinkName.startsWith('profile:')) {
-    // Format: profile:card_name:profile_name
-    const parts = sinkName.split(':');
-    const card = parts.slice(1, -1).join(':');
-    const profile = parts[parts.length - 1];
-    await new Promise<void>((resolve) => {
-      exec(`pactl set-card-profile '${card}' '${profile}'`, { env: process.env }, () => resolve());
+  if (sinkName.startsWith(PROFILE_PREFIX)) {
+    const rest = sinkName.slice(PROFILE_PREFIX.length);
+    // rest = "alsa_card.pci-0000_00_1b.0:output:hdmi-stereo+input:analog-stereo"
+    const colonIdx = rest.indexOf(':output:');
+    if (colonIdx === -1) return;
+    const card = rest.slice(0, colonIdx);
+    const profile = rest.slice(colonIdx + 1);
+    // Switch profile
+    await new Promise<void>(r => exec(`pactl set-card-profile '${card}' '${profile}'`, { env: process.env }, () => r()));
+    await new Promise(r => setTimeout(r, 600));
+    // Get the new default sink (first sink matching the PCI id of this card)
+    const pciId = card.replace('alsa_card.', '');
+    const newSink = await new Promise<string>(r => {
+      exec(`pactl list short sinks | grep '${pciId}' | head -1 | awk '{print $2}'`, { env: process.env }, (_e, out) => r(out.trim()));
     });
-    // Wait a moment for the new sink to appear
-    await new Promise(r => setTimeout(r, 500));
-    // Set default sink to the first sink now active on this card
-    await new Promise<void>((resolve) => {
-      exec(`pactl list short sinks | grep "${card.split('.')[0]}" | head -1 | cut -f2`, { env: process.env }, (_err, out) => {
-        const newSink = out.trim();
-        if (newSink) exec(`pactl set-default-sink '${newSink}'`, { env: process.env }, () => resolve());
-        else resolve();
-      });
-    });
+    if (newSink) {
+      await new Promise<void>(r => exec(`pactl set-default-sink '${newSink}'`, { env: process.env }, () => r()));
+    }
   } else {
-    await new Promise<void>((resolve) => {
-      exec(`pactl set-default-sink '${sinkName}'`, { env: process.env }, () => resolve());
-    });
+    // Direct sink selection — also switch back to analog profile if currently on HDMI
+    const pciId = sinkName.replace('alsa_output.', '').replace(/\.[^.]+$/, '');
+    const card = `alsa_card.${pciId}`;
+    const isAnalog = sinkName.includes('analog');
+    if (isAnalog) {
+      await new Promise<void>(r => exec(`pactl set-card-profile '${card}' 'output:analog-stereo+input:analog-stereo' 2>/dev/null || true`, { env: process.env }, () => r()));
+      await new Promise(r => setTimeout(r, 400));
+      await new Promise<void>(r => exec(`pactl set-default-sink '${sinkName}'`, { env: process.env }, () => r()));
+    } else {
+      await new Promise<void>(r => exec(`pactl set-default-sink '${sinkName}'`, { env: process.env }, () => r()));
+    }
   }
 }
 
@@ -79,7 +84,7 @@ export function getAudioState(): Promise<AudioState> {
       { env: process.env }, (err, stdout) => {
         if (err) { resolve({ sink: '', volume: 100, muted: false }); return; }
         const sink = stdout.match(/Default Sink:\s*(.+)/)?.[1]?.trim() ?? '';
-        const vol  = stdout.match(/(\d+)%/);
+        const vol = stdout.match(/(\d+)%/);
         resolve({ sink, volume: vol ? parseInt(vol[1]) : 100, muted: /Mute:\s*yes/i.test(stdout) });
       });
   });
