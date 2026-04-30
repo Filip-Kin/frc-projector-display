@@ -54,7 +54,7 @@ function buildQrPage(qrDataUrl) {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>FRC Display</title>
+<title>Configure Display</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -89,7 +89,7 @@ function buildQrPage(qrDataUrl) {
 </style>
 </head>
 <body>
-  <h1>FRC Display</h1>
+  <h1>Configure Display</h1>
   <div class="qr-box"><img src="${qrDataUrl}" alt="QR Code"></div>
   <div>
     <div class="pin-label">PIN</div>
