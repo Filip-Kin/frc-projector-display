@@ -6,7 +6,10 @@ const { execFile, exec, spawn } = require('child_process');
 const path = require('path');
 const QRCode = require('qrcode');
 
-const SERVER_URL = process.env.SERVER_URL || 'wss://display.filipkin.com';
+const VERSION = require('../package.json').version;
+const SERVER_BASE = process.env.SERVER_URL || 'https://display.filipkin.com';
+// Convert https:// → wss:// for WebSocket connection
+const SERVER_URL = SERVER_BASE.replace(/^https?:\/\//, (m) => m === 'https://' ? 'wss://' : 'ws://');
 const LOCAL_PORT = parseInt(process.env.LOCAL_PORT || '3000', 10);
 const CHROMIUM_DEBUG_PORT = parseInt(process.env.CHROMIUM_DEBUG_PORT || '9222', 10);
 const VNC_PORT = parseInt(process.env.VNC_PORT || '5900', 10);
@@ -82,6 +85,7 @@ function buildQrPage(qrDataUrl) {
     font-variant-numeric: tabular-nums;
   }
   .url { font-size: 0.85rem; color: #555; word-break: break-all; text-align: center; max-width: 480px; }
+  .version { font-size: 0.75rem; color: #333; position: fixed; bottom: 12px; right: 16px; }
 </style>
 </head>
 <body>
@@ -92,6 +96,7 @@ function buildQrPage(qrDataUrl) {
     <div class="pin">${PIN}</div>
   </div>
   <div class="url">${CONTROL_URL}</div>
+  <div class="version">v${VERSION}</div>
 </body>
 </html>`;
 }

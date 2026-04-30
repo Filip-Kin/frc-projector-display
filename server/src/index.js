@@ -17,6 +17,24 @@ app.get('/', (req, res) => res.redirect('/control'));
 app.get('/control', (req, res) => res.sendFile(path.join(__dirname, '../public/control.html')));
 app.get('/vnc/:pin', (req, res) => res.sendFile(path.join(__dirname, '../public/vnc.html')));
 
+// Self-hosted distribution endpoints
+app.get('/version.json', (req, res) => {
+  try {
+    const pkg = require('../client-dist/package.json');
+    res.json({ version: pkg.version });
+  } catch { res.json({ version: '0.0.0' }); }
+});
+
+app.get('/install.sh', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain');
+  res.sendFile(path.join(__dirname, '../client-dist/install.sh'));
+});
+
+app.get('/update.sh', (req, res) => {
+  res.setHeader('Content-Type', 'text/plain');
+  res.sendFile(path.join(__dirname, '../client-dist/update.sh'));
+});
+
 app.get('/api/nexus/events', (req, res) => {
   const apiKey = process.env.NEXUS_API_KEY;
   if (!apiKey) { res.json([]); return; }

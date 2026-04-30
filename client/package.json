@@ -1,6 +1,6 @@
 {
   "name": "frc-projector-display-client",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Thin client daemon for FRC projector display system",
   "main": "src/daemon.js",
   "scripts": {
