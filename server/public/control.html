@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>FRC Display Control</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111;
+    color: #f0f0f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    min-height: 100vh;
+    padding: 16px;
+  }
+  h1 { font-size: 1.2rem; font-weight: 600; margin-bottom: 16px; color: #4af; }
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #1c1c1c;
+    border-radius: 10px;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+  }
+  .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #555;
+    flex-shrink: 0;
+  }
+  .dot.online { background: #4f4; }
+  .dot.offline { background: #f44; }
+  #connect-section { margin-bottom: 16px; }
+  .pin-row { display: flex; gap: 8px; }
+  input[type=text], input[type=url] {
+    flex: 1;
+    background: #1c1c1c;
+    border: 1px solid #333;
+    border-radius: 8px;
+    color: #f0f0f0;
+    padding: 12px 14px;
+    font-size: 1rem;
+    outline: none;
+  }
+  input[type=text]:focus, input[type=url]:focus { border-color: #4af; }
+  input[type=text]::placeholder { color: #555; }
+  button {
+    background: #4af;
+    color: #000;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 20px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:active { opacity: 0.8; }
+  button.secondary {
+    background: #333;
+    color: #f0f0f0;
+  }
+  button.danger { background: #f44; color: #fff; }
+  #control-section { display: none; }
+  .section-title {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #666;
+    margin: 20px 0 10px;
+  }
+  .mode-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .mode-btn {
+    background: #1c1c1c;
+    border: 2px solid #2a2a2a;
+    border-radius: 12px;
+    color: #ccc;
+    padding: 16px 12px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: center;
+    line-height: 1.3;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .mode-btn .icon { font-size: 1.4rem; display: block; margin-bottom: 4px; }
+  .mode-btn.active {
+    border-color: #4af;
+    color: #4af;
+    background: #0d1f2d;
+  }
+  .mode-config {
+    background: #1c1c1c;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .mode-config.visible { display: block; }
+  .mode-config label {
+    display: block;
+    font-size: 0.8rem;
+    color: #888;
+    margin-bottom: 6px;
+    margin-top: 12px;
+  }
+  .mode-config label:first-child { margin-top: 0; }
+  select {
+    width: 100%;
+    background: #252525;
+    border: 1px solid #333;
+    border-radius: 8px;
+    color: #f0f0f0;
+    padding: 12px 14px;
+    font-size: 0.95rem;
+    outline: none;
+  }
+  .apply-row { display: flex; gap: 8px; margin-top: 14px; }
+  .apply-row button { flex: 1; }
+  #ndi-refresh { padding: 12px; flex: 0 0 auto; }
+  .qr-btn {
+    width: 100%;
+    margin-top: 8px;
+    background: #2a2a1a;
+    color: #fa0;
+    border: 1px solid #fa04;
+  }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #222;
+    color: #f0f0f0;
+    padding: 10px 20px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 100;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<h1>FRC Display Control</h1>
+
+<div id="connect-section">
+  <div class="pin-row">
+    <input type="text" id="pin-input" placeholder="Enter PIN (e.g. A3X9K2)" maxlength="6" autocomplete="off" autocapitalize="characters">
+    <button id="connect-btn" onclick="connect()">Connect</button>
+  </div>
+</div>
+
+<div class="status-bar">
+  <div class="dot" id="status-dot"></div>
+  <span id="status-text">Not connected</span>
+</div>
+
+<div id="control-section">
+  <div class="section-title">Display Mode</div>
+  <div class="mode-grid">
+    <div class="mode-btn" id="mode-home" onclick="selectMode('home')">
+      <span class="icon">🏠</span>Home / QR
+    </div>
+    <div class="mode-btn" id="mode-ndi" onclick="selectMode('ndi')">
+      <span class="icon">📡</span>NDI Monitor
+    </div>
+    <div class="mode-btn" id="mode-fim" onclick="selectMode('fim')">
+      <span class="icon">📋</span>FIM Queuing
+    </div>
+    <div class="mode-btn" id="mode-nexus" onclick="selectMode('nexus')">
+      <span class="icon">🔗</span>Nexus Queuing
+    </div>
+    <div class="mode-btn" id="mode-youtube" onclick="selectMode('youtube')">
+      <span class="icon">▶️</span>YouTube Live
+    </div>
+    <div class="mode-btn" id="mode-url" onclick="selectMode('url')">
+      <span class="icon">🌐</span>Custom URL
+    </div>
+    <div class="mode-btn" id="mode-vnc" onclick="selectMode('vnc')">
+      <span class="icon">🖥️</span>Web VNC
+    </div>
+    <div class="mode-btn" id="mode-fta" onclick="selectMode('fta')" style="opacity:0.4;cursor:not-allowed">
+      <span class="icon">🤖</span>FTA Buddy<br><small>(soon)</small>
+    </div>
+  </div>
+
+  <!-- NDI config -->
+  <div class="mode-config" id="config-ndi">
+    <label>NDI Source</label>
+    <div style="display:flex;gap:8px">
+      <select id="ndi-source-select" style="flex:1">
+        <option value="">-- no sources found --</option>
+      </select>
+      <button id="ndi-refresh" class="secondary" onclick="refreshNdi()" title="Refresh">↻</button>
+    </div>
+    <div class="apply-row">
+      <button onclick="applyMode()">Apply</button>
+    </div>
+  </div>
+
+  <!-- FIM config -->
+  <div class="mode-config" id="config-fim">
+    <label>FIM Event Key</label>
+    <input type="text" id="fim-key" placeholder="e.g. ABC123">
+    <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
+  </div>
+
+  <!-- Nexus config -->
+  <div class="mode-config" id="config-nexus">
+    <label>Nexus Event ID</label>
+    <input type="text" id="nexus-event" placeholder="e.g. 2025MIGLE">
+    <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
+  </div>
+
+  <!-- YouTube config -->
+  <div class="mode-config" id="config-youtube">
+    <label>YouTube URL or Video ID</label>
+    <input type="text" id="youtube-id" placeholder="https://youtube.com/watch?v=... or video ID">
+    <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
+  </div>
+
+  <!-- Custom URL config -->
+  <div class="mode-config" id="config-url">
+    <label>URL</label>
+    <input type="url" id="custom-url" placeholder="https://...">
+    <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
+  </div>
+
+  <!-- VNC config -->
+  <div class="mode-config" id="config-vnc">
+    <p style="color:#888;font-size:0.85rem;margin-bottom:12px">Opens a web VNC session to the display in a new tab.</p>
+    <div class="apply-row"><button onclick="applyMode()">Open VNC</button></div>
+  </div>
+
+  <button class="qr-btn" onclick="showQr()">📱 Show QR Code on Screen</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let ws = null;
+let currentPin = '';
+let currentMode = 'home';
+let ndiSources = [];
+
+const params = new URLSearchParams(window.location.search);
+const prePin = params.get('pin');
+if (prePin) {
+  document.getElementById('pin-input').value = prePin.toUpperCase();
+  setTimeout(connect, 200);
+}
+
+function wsUrl(path) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${location.host}${path}`;
+}
+
+function connect() {
+  const pin = document.getElementById('pin-input').value.trim().toUpperCase();
+  if (!pin || pin.length < 4) { toast('Enter a valid PIN'); return; }
+  currentPin = pin;
+
+  if (ws) ws.close();
+
+  setStatus('connecting', `Connecting (PIN: ${pin})…`);
+  ws = new WebSocket(wsUrl(`/ws/control?pin=${pin}`));
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'device_connected') {
+      setStatus('online', `Connected · PIN ${pin}`);
+      document.getElementById('control-section').style.display = 'block';
+      if (msg.ndiSources) updateNdiSources(msg.ndiSources);
+    } else if (msg.type === 'device_disconnected') {
+      setStatus('offline', `Waiting for device (PIN: ${pin})`);
+      document.getElementById('control-section').style.display = 'none';
+    } else if (msg.type === 'ndi_sources') {
+      updateNdiSources(msg.sources);
+    } else if (msg.type === 'error') {
+      toast(msg.message);
+    }
+  };
+
+  ws.onclose = () => {
+    setStatus('offline', 'Disconnected — tap Connect to retry');
+    document.getElementById('control-section').style.display = 'none';
+  };
+
+  ws.onerror = () => toast('WebSocket error');
+}
+
+function setStatus(state, text) {
+  const dot = document.getElementById('status-dot');
+  dot.className = 'dot ' + (state === 'online' ? 'online' : state === 'offline' ? 'offline' : '');
+  document.getElementById('status-text').textContent = text;
+}
+
+let selectedMode = null;
+
+function selectMode(mode) {
+  if (mode === 'fta') return;
+  selectedMode = mode;
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('mode-' + mode)?.classList.add('active');
+  document.querySelectorAll('.mode-config').forEach(c => c.classList.remove('visible'));
+  const cfg = document.getElementById('config-' + mode);
+  if (cfg) cfg.classList.add('visible');
+}
+
+function applyMode() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
+  let msg;
+  switch (selectedMode) {
+    case 'home':
+      msg = { type: 'set_mode', mode: 'home' };
+      break;
+    case 'ndi': {
+      const src = document.getElementById('ndi-source-select').value;
+      if (!src) { toast('Select an NDI source'); return; }
+      msg = { type: 'set_mode', mode: 'ndi', source: src };
+      break;
+    }
+    case 'fim': {
+      const key = document.getElementById('fim-key').value.trim();
+      if (!key) { toast('Enter FIM event key'); return; }
+      msg = { type: 'set_mode', mode: 'chromium', url: `https://fim-queueing.web.app/?key=${key}` };
+      break;
+    }
+    case 'nexus': {
+      const ev = document.getElementById('nexus-event').value.trim();
+      if (!ev) { toast('Enter Nexus event ID'); return; }
+      msg = { type: 'set_mode', mode: 'chromium', url: `https://frc.nexus/en/event/${ev}/pitdisplay` };
+      break;
+    }
+    case 'youtube': {
+      let val = document.getElementById('youtube-id').value.trim();
+      if (!val) { toast('Enter YouTube URL or ID'); return; }
+      if (!val.startsWith('http')) val = `https://www.youtube.com/watch?v=${val}`;
+      msg = { type: 'set_mode', mode: 'chromium', url: val };
+      break;
+    }
+    case 'url': {
+      const u = document.getElementById('custom-url').value.trim();
+      if (!u) { toast('Enter a URL'); return; }
+      msg = { type: 'set_mode', mode: 'chromium', url: u };
+      break;
+    }
+    case 'vnc': {
+      window.open(`/vnc/${currentPin}`, '_blank');
+      msg = { type: 'set_mode', mode: 'vnc' };
+      break;
+    }
+    default: toast('Select a mode first'); return;
+  }
+  ws.send(JSON.stringify(msg));
+  toast('Sent!');
+}
+
+function showQr() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
+  ws.send(JSON.stringify({ type: 'show_qr' }));
+  toast('QR code shown for 20 seconds');
+}
+
+function refreshNdi() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected'); return; }
+  ws.send(JSON.stringify({ type: 'refresh_ndi' }));
+  toast('Refreshing NDI sources…');
+}
+
+function updateNdiSources(sources) {
+  ndiSources = sources || [];
+  const sel = document.getElementById('ndi-source-select');
+  const prev = sel.value;
+  sel.innerHTML = ndiSources.length
+    ? ndiSources.map(s => `<option value="${s}">${s}</option>`).join('')
+    : '<option value="">-- no sources found --</option>';
+  if (prev && ndiSources.includes(prev)) sel.value = prev;
+}
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+document.getElementById('pin-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') connect();
+});
+</script>
+</body>
+</html>

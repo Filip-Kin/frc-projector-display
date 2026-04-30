@@ -1,0 +1,15 @@
+{
+  "name": "frc-projector-display-server",
+  "version": "1.0.0",
+  "description": "WebSocket hub and control UI for FRC projector display system",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.16.0",
+    "@novnc/novnc": "^1.4.0"
+  }
+}
