@@ -112,6 +112,12 @@
   .rank-row .team { flex: 1; color: #ddd; font-weight: 700; font-variant-numeric: tabular-nums; }
   .rank-row .record { color: #666; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
 
+  .schedule-delta { font-size: 0.95rem; font-weight: 700; padding: 8px 12px;
+    border-radius: 6px; text-align: center; flex-shrink: 0; letter-spacing: 0.02em; }
+  .schedule-delta.behind  { background: #2a0a0a; color: #faa; border: 1px solid #f664; }
+  .schedule-delta.ahead   { background: #0a2a0a; color: #8f8; border: 1px solid #8f84; }
+  .schedule-delta.on-time { background: #181818; color: #888; }
+
   .empty { color: #444; font-size: 0.9rem; font-style: italic; padding: 14px 0; }
 
   /* ── Status footer ── */
@@ -194,18 +200,52 @@ function statusKind(s) {
 
 function widgetMatches(el, data) {
   const all = (data?.matches || []).filter(m => m && m.label);
-  // Anchor on the most-current match (On field > Now queuing > first labelled)
-  const onFieldIdx = all.findIndex(m => /on field/i.test(m.status));
-  const nowQIdx    = all.findIndex(m => /now queuing/i.test(m.status));
-  const startIdx   = onFieldIdx >= 0 ? onFieldIdx
-                   : nowQIdx    >= 0 ? nowQIdx
-                   : all.findIndex(m => m.status);
-  const slice = startIdx >= 0 ? all.slice(startIdx, startIdx + 5) : all.slice(0, 5);
+
+  // Nexus retains status='On field' on every completed match, so the FIRST
+  // "On field" is usually Practice 1. Anchor on the LAST one — that's the
+  // most-recently-on-field match and the user's "now playing".
+  let startIdx = -1;
+  for (let i = all.length - 1; i >= 0; i--) {
+    if (/on field/i.test(all[i].status)) { startIdx = i; break; }
+  }
+  if (startIdx < 0 && data.nowQueuing) {
+    startIdx = all.findIndex(m => m.label === data.nowQueuing);
+  }
+  if (startIdx < 0) startIdx = all.findIndex(m => m.status);
+  if (startIdx < 0) startIdx = 0;
+  const slice = all.slice(startIdx, startIdx + 5);
+
+  // Schedule delta from the anchor match (positive ms = behind schedule)
+  const anchor = all[startIdx];
+  const sched = anchor?.times?.scheduledStartTime;
+  const est   = anchor?.times?.estimatedStartTime;
+  let deltaHtml = '';
+  if (sched && est) {
+    const dMs = est - sched;
+    const min = Math.round(Math.abs(dMs) / 60000);
+    if (min < 1) {
+      deltaHtml = `<div class="schedule-delta on-time">On schedule</div>`;
+    } else {
+      const cls = dMs > 0 ? 'behind' : 'ahead';
+      const word = dMs > 0 ? 'behind' : 'ahead';
+      deltaHtml = `<div class="schedule-delta ${cls}">Running ${min} min ${word}</div>`;
+    }
+  }
+
+  // First card in the slice is the hero (on-field). Subsequent cards style by
+  // their actual status (avoids multiple hero cards when the API echoes
+  // "On field" on already-played matches).
+  const cards = slice.map((m, i) => {
+    let kind = '';
+    if (i === 0) kind = 'on-field';
+    else if (/on deck/i.test(m.status))     kind = 'on-deck';
+    else if (/now queuing/i.test(m.status)) kind = 'now-queuing';
+    return matchCardHtml(m, kind);
+  }).join('');
+
   el.innerHTML = `<div class="col-title">Matches</div>
-    <div class="matches-list">${slice.length
-      ? slice.map(m => matchCardHtml(m, statusKind(m.status))).join('')
-      : '<div class="empty">No matches scheduled</div>'}
-    </div>`;
+    ${deltaHtml}
+    <div class="matches-list">${cards || '<div class="empty">No matches scheduled</div>'}</div>`;
 }
 
 function widgetUpdates(el, data) {
