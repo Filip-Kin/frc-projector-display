@@ -115,12 +115,7 @@ xset -dpms &
 xset s noblank &
 unclutter -idle 1 -root &
 systemctl --user start pipewire wireplumber pipewire-pulse 2>/dev/null &
-${CHROMIUM_BIN} --kiosk --no-sandbox --disable-infobars \\
-  --disable-translate --disable-features=TranslateUI \\
-  --no-first-run --disable-default-apps \\
-  --autoplay-policy=no-user-gesture-required \\
-  --remote-debugging-port=9222 \\
-  about:blank &
+# Chromium is launched by the daemon (one instance per detected monitor).
 EOF
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${USER_HOME}/.config"
 

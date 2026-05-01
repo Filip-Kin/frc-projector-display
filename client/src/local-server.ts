@@ -6,11 +6,11 @@ import QRCode from 'qrcode';
 import path from 'path';
 import { exec } from 'child_process';
 import { WebSocket } from 'ws';
-import { state } from './state.js';
-import { cdpNavigate } from './cdp.js';
+import { state, isAnyNdiActive } from './state.js';
+import { cdpNavigateAll } from './cdp.js';
 import { stopAp, startAp, connectWifi, scanWifi, checkInternet } from './wifi.js';
 import { getEthernetInterface, getEthernetStatus, applyDhcp, applyCustomStaticIp } from './network.js';
-import { setHome, stopNdi, stopVnc } from './modes.js';
+import { stopNdiOnOutput, stopVnc } from './modes.js';
 import { startImprov, stopImprov } from './improv.js';
 import { startUsbWatcher, stopUsbWatcher } from './usb-provisioning.js';
 
@@ -71,7 +71,7 @@ function trackProbeRedirect(ip: string) {
     console.log(`[ap] ghost client ${ip} -> escalating AP page to BLE/USB`);
     state.apEscalateImprov = true;
     // Force a fresh GET so the projector picks up the new page layout
-    cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
+    cdpNavigateAll(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
   }, 11000);
   ghostClients.set(ip, { timer });
 }
@@ -165,10 +165,10 @@ app.get('/api/debug', async (_req, res) => {
     pin: PIN,
     apMode: state.apMode,
     apIface: state.apIface,
-    currentMode: state.currentMode,
+    outputs: state.outputs.map(o => ({ id: o.id, mode: o.mode, ndi: !!o.ndiProcess, w: o.width, h: o.height })),
     wsState: state.serverWs?.readyState,    // 0=connecting 1=open 2=closing 3=closed
     wsEverConnected: state.wsEverConnected,
-    ndiProcessAlive: state.ndiProcess !== null,
+    ndiActive: isAnyNdiActive(),
     defaultRoute: route || '(none)',
     links,
     timestamp: new Date().toISOString(),
@@ -267,7 +267,7 @@ export async function applyCredentials(
       if (!state.apIface) return;
       state.apMode = true;
       await startAp(PIN, state.apIface).catch(() => {});
-      await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+      await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
     };
 
     if (onMessage) await onMessage(`Connecting to "${ssid}"...`);
@@ -290,7 +290,7 @@ export async function applyCredentials(
     }
 
     if (result.portalUrl) {
-      await cdpNavigate(result.portalUrl).catch(() => {});
+      await cdpNavigateAll(result.portalUrl).catch(() => {});
       return { kind: 'captive_portal', portalUrl: result.portalUrl };
     }
     if (!result.online) {
@@ -346,14 +346,14 @@ export async function runPostConnect() {
     // device-to-server WS hasn't actually reconnected yet. Show the connecting
     // spinner and let the WS-open handler in daemon.ts navigate to / when the
     // server hand-shake completes.
-    await cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+    await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
     state.postConnectInProgress = false;
   }
 }
 
 export async function enterApMode() {
   console.log('[ap] === enterApMode called ===');
-  console.log(`[ap] currentMode=${state.currentMode} ndi=${!!state.ndiProcess} apMode=${state.apMode} applyingCredentials=${state.applyingCredentials}`);
+  console.log(`[ap] outputs=${state.outputs.map(o => `${o.id}:${o.mode}`).join(',')} ndiActive=${isAnyNdiActive()} apMode=${state.apMode} applyingCredentials=${state.applyingCredentials}`);
   // applyCredentials is mid-flight; bringing the AP back up would steal the
   // wifi adapter from the connection it just established and brick the test.
   if (state.applyingCredentials) {
@@ -362,7 +362,7 @@ export async function enterApMode() {
   }
 
   // Stop any active media — ndi-play covers Chromium fullscreen so clear it first
-  await stopNdi();
+  for (const o of state.outputs) await stopNdiOnOutput(o);
   stopVnc();
   console.log('[ap] media stopped');
 
@@ -372,7 +372,7 @@ export async function enterApMode() {
 
   if (!iface) {
     console.log('[ap] NO WIFI ADAPTER — showing no-connection screen');
-    await cdpNavigate(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
+    await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
     return;
   }
 
@@ -393,12 +393,12 @@ export async function enterApMode() {
     state.apMode = true;
     state.apIface = iface;
     console.log('[ap] hotspot ACTIVE — navigating to AP page');
-    await cdpNavigate(`http://localhost:${LOCAL_PORT}/`);
+    await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/`);
     console.log('[ap] navigation complete');
     await startProvisioningExtras();
   } catch (err: any) {
     console.error(`[ap] FAILED to start: ${err.message}`);
-    await cdpNavigate(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
+    await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
   }
 }
 
@@ -436,11 +436,11 @@ async function startProvisioningExtras() {
     onIdentify: async () => {
       // Flash a fullscreen "this is me" page for 3s so the operator can pick
       // the right device out of a fleet from the BLE picker.
-      await cdpNavigate(`http://localhost:${LOCAL_PORT}/identify`).catch(() => {});
+      await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/identify`).catch(() => {});
       setTimeout(() => {
         if (!state.apMode) return;
         // After the flash, return to whatever AP-mode page is current
-        cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
+        cdpNavigateAll(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
       }, 3000);
     },
     onProvisionedDone: async () => {
@@ -468,11 +468,11 @@ async function startProvisioningExtras() {
 async function setProvisioningStatus(s: NonNullable<typeof state.provisioningStatus>) {
   state.provisioningStatus = s;
   // Force a fresh render so the projector picks up the status screen
-  await cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
+  await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
 }
 async function clearProvisioningStatus() {
   state.provisioningStatus = null;
-  await cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
+  await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
 }
 
 export const localServer = createServer(app);

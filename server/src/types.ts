@@ -1,10 +1,24 @@
 import type { WebSocket } from 'ws';
 
+export interface OutputInfo {
+  id: string;
+  width: number;
+  height: number;
+}
+
+export interface Metrics {
+  cpu: number;
+  mem: { usedMB: number; totalMB: number };
+  net: { iface: string; rxKBps: number; txKBps: number };
+}
+
 export interface DeviceState {
   ws: WebSocket;
   ndiSources: NdiSource[];
   audioSinks: AudioSink[];
   audioState: AudioState;
+  outputs: OutputInfo[];
+  metrics?: Metrics;
   lastSeen: number;
   version?: string;
   hasInternet?: boolean;
@@ -28,6 +42,8 @@ export interface WsMessage {
   pin?: string;
   mode?: string;
   url?: string;
+  output?: string;
+  outputs?: OutputInfo[];
   source?: string;
   sources?: NdiSource[];
   sinks?: AudioSink[];
@@ -43,5 +59,6 @@ export interface WsMessage {
   ndiSources?: NdiSource[];
   audioSinks?: AudioSink[];
   audioState?: AudioState;
+  metrics?: Metrics;
   message?: string;
 }

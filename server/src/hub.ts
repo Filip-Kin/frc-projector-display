@@ -21,10 +21,17 @@ export function handleDevice(ws: WebSocket) {
     if (msg.type === 'register') {
       pin = (msg.pin ?? '').toUpperCase();
       if (!pin) return;
-      devices.set(pin, { ws, ndiSources: [], audioSinks: [], audioState: { sink: '', volume: 100, muted: false }, lastSeen: Date.now() });
-      console.log(`[device] registered PIN ${pin}`);
+      devices.set(pin, {
+        ws,
+        ndiSources: [],
+        audioSinks: [],
+        audioState: { sink: '', volume: 100, muted: false },
+        outputs: msg.outputs ?? [],
+        lastSeen: Date.now(),
+      });
+      console.log(`[device] registered PIN ${pin} outputs=${(msg.outputs ?? []).map(o => o.id).join(',') || '(none)'}`);
       const ctrl = controllers.get(pin);
-      if (ctrl) send(ctrl, { type: 'device_connected' });
+      if (ctrl) send(ctrl, { type: 'device_connected', outputs: msg.outputs ?? [] });
 
     } else if (msg.type === 'heartbeat') {
       if (!pin) return;
@@ -54,6 +61,15 @@ export function handleDevice(ws: WebSocket) {
         if (ctrl) send(ctrl, { type: 'audio_sinks', sinks: msg.sinks, state: msg.state });
       }
 
+    } else if (msg.type === 'metrics') {
+      if (!pin || !msg.metrics) return;
+      const d = devices.get(pin);
+      if (d) {
+        d.metrics = msg.metrics;
+        const ctrl = controllers.get(pin);
+        if (ctrl) send(ctrl, { type: 'metrics', metrics: msg.metrics });
+      }
+
     } else if (msg.type === 'log') {
       if (pin && msg.level && msg.msg) {
         insertLog(pin, msg.level, msg.msg);
@@ -77,7 +93,7 @@ export function handleController(ws: WebSocket, rawPin: string) {
 
   const d = devices.get(pin);
   send(ws, d
-    ? { type: 'device_connected', ndiSources: d.ndiSources, audioSinks: d.audioSinks, audioState: d.audioState }
+    ? { type: 'device_connected', ndiSources: d.ndiSources, audioSinks: d.audioSinks, audioState: d.audioState, outputs: d.outputs, metrics: d.metrics }
     : { type: 'device_disconnected' }
   );
 
