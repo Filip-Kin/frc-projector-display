@@ -1,6 +1,6 @@
 {
   "name": "frc-projector-display-client",
-  "version": "1.4.6",
+  "version": "1.4.7",
   "description": "Thin client daemon for FRC projector display system",
   "module": "src/daemon.ts",
   "scripts": {

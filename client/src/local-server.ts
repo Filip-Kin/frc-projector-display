@@ -26,14 +26,38 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Captive portal: when in AP mode, redirect unknown hosts to /setup
+// Captive portal: when in AP mode, redirect unknown hosts to /setup.
+// Android-friendly mode: once the user has visited /setup, subsequent
+// connectivity probes get 204 ("signed in") — prevents auto-disconnect to
+// home WiFi while the user is still configuring.
+let setupVisitedAt: number | null = null;
+
 app.use((req, res, next) => {
   if (!state.apMode) return next();
   const host = (req.get('host') ?? '').split(':')[0];
-  if (host !== AP_IP && host !== 'localhost' && host !== '127.0.0.1') {
-    return res.redirect(`http://${AP_IP}:${LOCAL_PORT}/setup`);
+
+  // Local AP IP traffic — pass through to actual routes
+  if (host === AP_IP || host === 'localhost' || host === '127.0.0.1') {
+    return next();
   }
-  next();
+
+  const ua = (req.get('user-agent') ?? '').toLowerCase();
+  const isAndroidProbe = req.path === '/generate_204' || req.path === '/gen_204';
+  const isWindowsProbe = req.path === '/connecttest.txt' || req.path === '/ncsi.txt';
+  const isAppleProbe   = req.path === '/hotspot-detect.html' || req.path === '/library/test/success.html';
+  const isProbe = isAndroidProbe || isWindowsProbe || isAppleProbe || ua.includes('captiveportal');
+
+  // After user has loaded setup page, tell connectivity probes the network is fine
+  // → Android keeps the connection instead of auto-switching back to home WiFi
+  if (isProbe && setupVisitedAt && Date.now() - setupVisitedAt < 5 * 60 * 1000) {
+    if (isAndroidProbe) return res.status(204).end();
+    if (isAppleProbe)   return res.send('<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>');
+    if (isWindowsProbe) return res.send('Microsoft Connect Test');
+    return res.status(204).end();
+  }
+
+  // First-time probe (or expired) — redirect to setup so the captive portal popup appears
+  return res.redirect(`http://${AP_IP}:${LOCAL_PORT}/setup`);
 });
 
 app.get('/', async (_req, res) => {
@@ -112,6 +136,7 @@ app.get('/api/internet-status', async (_req, res) => {
 });
 
 app.get('/setup', async (_req, res) => {
+  setupVisitedAt = Date.now();   // tells future probes to return 204 (Android-friendly)
   const networks = await scanWifi().catch(() => []);
   res.send(buildSetupPage(networks));
 });
@@ -192,6 +217,7 @@ export async function enterApMode() {
   // Stop any active media — ndi-play covers Chromium fullscreen so clear it first
   await stopNdi();
   stopVnc();
+  setupVisitedAt = null;  // reset captive portal state for new AP session
   console.log('[ap] media stopped');
 
   const { getWifiInterface } = await import('./wifi.js');
@@ -224,7 +250,7 @@ export const localServer = createServer(app);
 
 function buildQrPage(qrDataUrl: string) {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>FRC Display</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:28px}h1{font-size:2.4rem;font-weight:700;letter-spacing:.02em}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #4af4}.qr-box img{display:block;width:280px;height:280px}.pin-label{font-size:1rem;color:#aaa;margin-bottom:4px}.pin{font-size:3rem;font-weight:800;letter-spacing:.25em;color:#4af}.url{font-size:.85rem;color:#555;word-break:break-all;text-align:center;max-width:480px}.version{font-size:.75rem;color:#333;position:fixed;bottom:12px;right:16px}</style>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:28px}h1{font-size:2.4rem;font-weight:700;letter-spacing:.02em}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #4af4}.qr-box img{display:block;width:280px;height:280px}.pin-label{font-size:1rem;color:#aaa;margin-bottom:4px}.pin{font-size:3rem;font-weight:800;letter-spacing:.25em;color:#4af}.url{font-size:.85rem;color:#555;word-break:break-all;text-align:center;max-width:480px}.version{font-size:1rem;color:#777;position:fixed;bottom:12px;right:16px}</style>
 </head><body>
 <h1>Configure Display</h1>
 <div class="qr-box"><img src="${qrDataUrl}" alt="QR"></div>
@@ -236,7 +262,7 @@ function buildQrPage(qrDataUrl: string) {
 
 function buildApPage(qrDataUrl: string) {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WiFi Setup</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:24px}h1{font-size:2rem;font-weight:700;color:#fa0}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #fa04}.qr-box img{display:block;width:260px;height:260px}.ssid{font-size:1.6rem;font-weight:700;letter-spacing:.06em;color:#fa0}.hint{font-size:.9rem;color:#888;text-align:center}.url{font-size:.8rem;color:#444;margin-top:4px}.version{font-size:.75rem;color:#333;position:fixed;bottom:12px;right:16px}</style>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:24px}h1{font-size:2rem;font-weight:700;color:#fa0}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #fa04}.qr-box img{display:block;width:260px;height:260px}.ssid{font-size:1.6rem;font-weight:700;letter-spacing:.06em;color:#fa0}.hint{font-size:.9rem;color:#888;text-align:center}.url{font-size:.8rem;color:#444;margin-top:4px}.version{font-size:1rem;color:#777;position:fixed;bottom:12px;right:16px}</style>
 </head><body>
 <h1>WiFi Setup</h1>
 <div class="qr-box"><img src="${qrDataUrl}" alt="WiFi QR"></div>
@@ -307,7 +333,7 @@ function buildConnectingPage() {
     animation:spin 0.9s linear infinite}
   @keyframes spin{to{transform:rotate(360deg)}}
   h1{font-size:1.6rem;font-weight:600;color:#888}
-  .version{font-size:.75rem;color:#333;position:fixed;bottom:12px;right:16px}
+  .version{font-size:1rem;color:#777;position:fixed;bottom:12px;right:16px}
 </style></head>
 <body>
   <div class="spinner"></div>
@@ -326,7 +352,7 @@ function buildNoConnectionPage() {
   h1{font-size:2.2rem;font-weight:800;color:#f44;letter-spacing:.02em}
   p{font-size:1.1rem;color:#aaa;max-width:520px;line-height:1.6}
   .url{font-size:.85rem;color:#555;margin-top:8px}
-  .version{font-size:.75rem;color:#2a2a2a;position:fixed;bottom:12px;right:16px}
+  .version{font-size:1rem;color:#666;position:fixed;bottom:12px;right:16px}
 </style></head>
 <body>
   <div class="icon">⚠️</div>
