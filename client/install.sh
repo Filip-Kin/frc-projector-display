@@ -137,6 +137,19 @@ echo "[8] Configuring NetworkManager..."
 systemctl enable NetworkManager 2>/dev/null || true
 systemctl start NetworkManager 2>/dev/null || true
 
+# Make the kernel skip default routes whose interface has lost carrier.
+# Without this, an unplugged ethernet's "linkdown" route still beats wifi
+# in the routing decision (lower metric), and all outbound TCP gets sent
+# into the dead interface and silently dropped. Symptom: wifi associates,
+# gets an IP, gateway pings work, but no public-internet traffic flows.
+cat > /etc/sysctl.d/99-frc-linkdown.conf << 'SYSCTL'
+net.ipv4.conf.all.ignore_routes_with_linkdown=1
+net.ipv4.conf.default.ignore_routes_with_linkdown=1
+net.ipv6.conf.all.ignore_routes_with_linkdown=1
+net.ipv6.conf.default.ignore_routes_with_linkdown=1
+SYSCTL
+sysctl --system >/dev/null 2>&1 || true
+
 # Tell NM to leave /etc/resolv.conf alone, and disable NM's internal
 # connectivity check (which probes nmcheck.gnome.org -- frequently blocked
 # by Pi-hole and other ad-blockers, causing nmcli con up to spend 15+s
