@@ -86,7 +86,21 @@ function pollAudioSinks(attempt = 0) {
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let ndiPollInterval:   ReturnType<typeof setInterval> | null = null;
 let metricsInterval:   ReturnType<typeof setInterval> | null = null;
+let connectingNavTimer: ReturnType<typeof setTimeout> | null = null;
 let hasReplayedOnce = false;
+
+// Restores each kiosk to its persisted mode (or home QR for unconfigured
+// outputs). Idempotent: safe to call on every reconnect; cdpNavigate is
+// fast for a same-URL navigation.
+async function restoreOutputs() {
+  const recs = getPersistedOutputs();
+  await Promise.all(state.outputs.map(o =>
+    recs[o.id]
+      ? Promise.resolve()
+      : cdpNavigate(`http://localhost:${LOCAL_PORT}/`, o.cdpPort).catch(() => {})
+  ));
+  await replayPersistedOutputs();
+}
 
 // Re-applies whatever per-output mode was active when the daemon last saved.
 // Runs once per process on the first successful WS open (so the network is
@@ -139,6 +153,7 @@ function connectToServer() {
   state.serverWs.on('open', async () => {
     state.wsEverConnected = true;
     if (apCheckTimer) { clearTimeout(apCheckTimer); apCheckTimer = null; }
+    if (connectingNavTimer) { clearTimeout(connectingNavTimer); connectingNavTimer = null; }
     clearTimeout(state.networkCheckTimer!);
     state.networkCheckTimer = null;
     log('info', '[ws] connected to server');
@@ -151,23 +166,19 @@ function connectToServer() {
       state.apMode = false; state.apIface = null;
       await stopProvisioningExtras();
     }
-    if (!hasReplayedOnce) {
+    // Restore the kiosks if they're not already showing the right thing.
+    // - First connect after boot: never replayed, always do it.
+    // - Just left AP mode: AP page is up, restore.
+    // - Was showing the /connecting screen because of a WS drop that ran past
+    //   the 15s grace period: restore so we don't sit on /connecting forever.
+    // - Brief deploy blip (< 15s grace): kiosks never moved off their mode,
+    //   no restore needed — keeps the queuing pages from flickering on every
+    //   server redeploy.
+    const needRestore = !hasReplayedOnce || wasApMode || state.kiosksShowingConnecting;
+    if (needRestore) {
       hasReplayedOnce = true;
-      // Outputs with a saved mode get replayed; everything else navigates to
-      // the home QR (covers fresh installs, freshly-added outputs, and any
-      // output that's never had a set_mode applied to it).
-      const recs = getPersistedOutputs();
-      await Promise.all(state.outputs.map(o =>
-        recs[o.id]
-          ? Promise.resolve()
-          : cdpNavigate(`http://localhost:${LOCAL_PORT}/`, o.cdpPort).catch(() => {})
-      ));
-      await replayPersistedOutputs();
-    } else if (wasApMode) {
-      // Coming back from AP mode — every kiosk was showing the AP page;
-      // navigate them all to home (replayed outputs will get re-replayed via
-      // their state, but that's a follow-up; for now this is the simple recovery).
-      await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+      state.kiosksShowingConnecting = false;
+      await restoreOutputs();
     }
 
     state.serverWs!.send(JSON.stringify({ type: 'register', pin: PIN, outputs: outputsForRegister() }));
@@ -299,10 +310,21 @@ function connectToServer() {
 
     if (state.wsEverConnected && !state.networkCheckTimer) {
       const ndiActive = isAnyNdiActive();
-      if (!ndiActive && !state.apMode) {
-        cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+      // Show "connecting" only after a 15s grace period — most server redeploys
+      // (Coolify) finish in under 30s, and slamming kiosks to /connecting for
+      // a 10s blip is more disruptive than the disconnect itself.
+      if (!ndiActive && !state.apMode && !connectingNavTimer) {
+        connectingNavTimer = setTimeout(() => {
+          connectingNavTimer = null;
+          if (state.serverWs?.readyState === WebSocket.OPEN) return;
+          if (state.apMode || isAnyNdiActive()) return;
+          state.kiosksShowingConnecting = true;
+          cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+        }, 15000);
       }
 
+      // 30s before we tear everything down to AP mode (was 5s — that
+      // tripped on every server deploy).
       state.networkCheckTimer = setTimeout(async () => {
         state.networkCheckTimer = null;
         if (state.apMode || state.serverWs?.readyState === WebSocket.OPEN) return;
@@ -315,7 +337,7 @@ function connectToServer() {
           return;
         }
         await enterApMode();
-      }, 5000);
+      }, 30000);
     }
   });
 

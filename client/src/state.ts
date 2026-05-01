@@ -27,6 +27,11 @@ export const state = {
   applyingCredentials: false,
   wsEverConnected:   false,
   reconnectDelay:    2000,
+  // Whether we've navigated kiosks to the /connecting screen because of a
+  // WS drop. On reconnect the daemon needs to restore them to their proper
+  // view; gated by this flag so brief deploys (which never reach the
+  // grace period) don't trigger a needless re-navigation.
+  kiosksShowingConnecting: false,
   apEscalateImprov:  false,
   provisioningStatus: null as null | { source: 'usb' | 'improv'; ssid: string; phase: 'connecting' | 'failed'; message?: string },
   forceWsReconnect: null as (() => void) | null,

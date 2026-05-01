@@ -463,10 +463,10 @@ async function fetchRankings() {
 // don't share an index when both happen to be enabled.
 const rankingsPageIdx = { sidebar: 0, bottom: 0 };
 const SIDEBAR_PAGE_SIZE = 22;
-// Bottom rankings: 5 columns × 8 rows = 40 per page. 75-team divisions
-// page as 40 + 35 (both fully populated 5-wide grids).
+// Bottom rankings: 5 columns × 6 rows = 30 per page. Larger rows are easier
+// to read across the pit, and 75-team divisions page cleanly as 30+30+15.
 const BOTTOM_COLS       = 5;
-const BOTTOM_ROWS_MAX   = 8;
+const BOTTOM_ROWS_MAX   = 6;
 const BOTTOM_PAGE_SIZE  = BOTTOM_COLS * BOTTOM_ROWS_MAX;
 const RANKINGS_CYCLE_MS = 8000;
 
