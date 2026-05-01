@@ -203,8 +203,16 @@ function onYouTubeIframeAPIReady() {
       onReady: (e) => {
         // Unmute once the player has had a moment to start. The mute=1 in
         // the URL is what lets autoplay succeed; we flip it off as soon as
-        // the player is ready so the operator gets audio.
-        setTimeout(() => { try { e.target.unMute(); e.target.setVolume(100); } catch {} }, 1200);
+        // the player is ready so the operator gets audio. Also seekTo past
+        // the playable end so live streams snap to live edge instead of
+        // resuming wherever the previous session left off.
+        setTimeout(() => {
+          try {
+            e.target.unMute();
+            e.target.setVolume(100);
+            e.target.seekTo(Number.MAX_SAFE_INTEGER, true);
+          } catch {}
+        }, 1200);
       }
     }
   });

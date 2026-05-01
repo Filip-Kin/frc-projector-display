@@ -21,17 +21,19 @@ export function handleDevice(ws: WebSocket) {
     if (msg.type === 'register') {
       pin = (msg.pin ?? '').toUpperCase();
       if (!pin) return;
+      const kind = msg.kind === 'lite' ? 'lite' : 'daemon';
       devices.set(pin, {
         ws,
         ndiSources: [],
         audioSinks: [],
         audioState: { sink: '', volume: 100, muted: false },
         outputs: msg.outputs ?? [],
+        kind,
         lastSeen: Date.now(),
       });
-      console.log(`[device] registered PIN ${pin} outputs=${(msg.outputs ?? []).map(o => o.id).join(',') || '(none)'}`);
+      console.log(`[device] registered PIN ${pin} kind=${kind} outputs=${(msg.outputs ?? []).map(o => o.id).join(',') || '(none)'}`);
       const ctrl = controllers.get(pin);
-      if (ctrl) send(ctrl, { type: 'device_connected', outputs: msg.outputs ?? [] });
+      if (ctrl) send(ctrl, { type: 'device_connected', outputs: msg.outputs ?? [], kind });
 
     } else if (msg.type === 'heartbeat') {
       if (!pin) return;
@@ -102,7 +104,7 @@ export function handleController(ws: WebSocket, rawPin: string) {
 
   const d = devices.get(pin);
   send(ws, d
-    ? { type: 'device_connected', ndiSources: d.ndiSources, audioSinks: d.audioSinks, audioState: d.audioState, outputs: d.outputs, metrics: d.metrics }
+    ? { type: 'device_connected', ndiSources: d.ndiSources, audioSinks: d.audioSinks, audioState: d.audioState, outputs: d.outputs, metrics: d.metrics, kind: d.kind ?? 'daemon' }
     : { type: 'device_disconnected' }
   );
 

@@ -21,7 +21,10 @@
   .widget { padding: 18px 20px; overflow: hidden; background: #0d0d0d;
     display: flex; flex-direction: column; gap: 10px; min-height: 0; }
   #sidebar { grid-area: sidebar; }
-  #bottom  { grid-area: bottom; border-top: 2px solid #1a1a1a; }
+  #bottom  { grid-area: bottom; border-top: 2px solid #1a1a1a;
+    /* leave room at the bottom for the fixed clock so it doesn't sit on
+       top of the last row of rankings or the bottom-row match cards */
+    padding-bottom: 32px; }
   .col-title { font-size: 0.85rem; letter-spacing: 0.18em; color: #4af; font-weight: 700;
     text-transform: uppercase; padding-bottom: 8px; border-bottom: 2px solid #1a3a55;
     flex-shrink: 0; }
@@ -263,7 +266,17 @@ function setStreamEmbed(src) {
       ytPlayer = new YT.Player(yt.id, {
         events: {
           onReady: (e) => {
-            setTimeout(() => { try { e.target.unMute(); e.target.setVolume(100); } catch {} }, 1200);
+            setTimeout(() => {
+              try {
+                e.target.unMute();
+                e.target.setVolume(100);
+                // Force live-edge for live streams. seekTo past the last
+                // playable position jumps to live edge for active live
+                // broadcasts. For VOD it just lands at end (acceptable —
+                // our use case is live event coverage, not recorded archives).
+                e.target.seekTo(Number.MAX_SAFE_INTEGER, true);
+              } catch {}
+            }, 1200);
           }
         }
       });
@@ -589,8 +602,11 @@ setInterval(updateStatusLine, 30000);
 async function pollRankings() {
   if (sidebarKind !== 'rankings' && bottomKind !== 'rankings') return;
   await fetchRankings();
-  if (sidebarKind === 'rankings') { widgetRankings(sidebarEl, 'sidebar'); maybeStartRankingsCycle(); }
+  if (sidebarKind === 'rankings') widgetRankings(sidebarEl, 'sidebar');
   if (bottomKind  === 'rankings') widgetRankings(bottomEl, 'bottom');
+  // Fire once per process, regardless of which slot has rankings; the
+  // cycle interval internally checks both placements each tick.
+  maybeStartRankingsCycle();
 }
 
 pollEvent();

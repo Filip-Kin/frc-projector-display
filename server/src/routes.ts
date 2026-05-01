@@ -270,6 +270,59 @@ export function registerRoutes(app: Application) {
     }
   });
 
+  // Server-side YouTube embed page. Mirror of the daemon's local /youtube
+  // so the lite kiosk (no daemon) can iframe it from the public origin.
+  // Same handler shape: ?v= | ?channel= | ?event=. Loads muted, unmutes
+  // via the IFrame API after onReady, seeks to live edge for streams.
+  function buildYtSrc(spec: { kind: 'video' | 'channel'; id: string }) {
+    const common = 'autoplay=1&mute=1&enablejsapi=1';
+    if (spec.kind === 'channel') return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.id)}&${common}`;
+    return `https://www.youtube.com/embed/${encodeURIComponent(spec.id)}?${common}&rel=0`;
+  }
+  app.get('/youtube', async (req, res) => {
+    const v  = String(req.query.v ?? '').trim();
+    const ch = String(req.query.channel ?? '').trim();
+    const ev = String(req.query.event ?? '').trim();
+    let src = '';
+    if (ch) src = buildYtSrc({ kind: 'channel', id: ch });
+    else if (v) src = buildYtSrc({ kind: 'video', id: v });
+    else if (ev) {
+      const w = await pickWebcastForEvent(ev).catch(() => null);
+      if (w?.id) src = buildYtSrc({ kind: w.kind === 'channel' ? 'channel' : 'video', id: w.id });
+    }
+    if (!src) { res.status(404).send('no stream available'); return; }
+
+    // Page reloads itself hourly so an event:KEY-resolved page picks up a
+    // new day's webcast without intervention.
+    const reloadJs = ev ? `setTimeout(() => location.reload(), 60 * 60 * 1000);` : '';
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#000;overflow:hidden}
+iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}
+</style></head><body>
+<iframe id="yt" src="${src}" allow="autoplay;fullscreen" allowfullscreen></iframe>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+function onYouTubeIframeAPIReady() {
+  const player = new YT.Player('yt', {
+    events: {
+      onReady: (e) => {
+        setTimeout(() => {
+          try {
+            e.target.unMute();
+            e.target.setVolume(100);
+            e.target.seekTo(Number.MAX_SAFE_INTEGER, true);
+          } catch {}
+        }, 1200);
+      }
+    }
+  });
+}
+${reloadJs}
+</script>
+</body></html>`);
+  });
+
   // Drives the dropdown on /control. One row per event with an active webcast,
   // already resolved to today's-or-latest. Frontend just stores `event:<key>`
   // as the streamSource and re-resolves at render time, so day rollovers and

@@ -200,6 +200,15 @@
      are constant — blanking everything is jarring). */
   body.ws-offline #control-section { opacity: 0.55; pointer-events: none; }
   body.ws-offline .status-bar       { opacity: 1; }
+  /* Lite-mode device: hide features that only work on a full daemon. */
+  body.device-lite #mode-ndi,
+  body.device-lite #config-ndi,
+  body.device-lite #audio-section,
+  body.device-lite #audio-section + .section-title,
+  body.device-lite #metrics-panel,
+  body.device-lite .lite-hide { display: none !important; }
+  body.device-lite #audio-section { display: none !important; }
+  body.device-lite [data-daemon-only] { display: none !important; }
   #screen-tabs {
     display: flex;
     gap: 6px;
@@ -439,12 +448,12 @@
   </div>
 
   <!-- System metrics -->
-  <div class="section-title">System</div>
-  <div id="metrics-panel" class="empty">Waiting for metrics…</div>
+  <div class="section-title" data-daemon-only>System</div>
+  <div id="metrics-panel" class="empty" data-daemon-only>Waiting for metrics…</div>
 
   <!-- Audio controls -->
-  <div class="section-title">Audio</div>
-  <div id="audio-section">
+  <div class="section-title" data-daemon-only>Audio</div>
+  <div id="audio-section" data-daemon-only>
     <label>Output Device</label>
     <select id="audio-sink-select" onchange="setAudioOutput(this.value)">
       <option value="">-- detecting… --</option>
@@ -548,10 +557,12 @@ function connect() {
     const msg = JSON.parse(e.data);
     if (msg.type === 'device_connected') {
       saveRecentPin(pin);
-      setStatus('online', `Connected · PIN ${pin}`);
+      const kindBadge = msg.kind === 'lite' ? ' (lite)' : '';
+      setStatus('online', `Connected · PIN ${pin}${kindBadge}`);
       document.body.classList.remove('ws-offline');
+      document.body.classList.toggle('device-lite', msg.kind === 'lite');
       document.getElementById('control-section').style.display = 'block';
-      document.getElementById('vnc-quick-btn').style.display = '';
+      document.getElementById('vnc-quick-btn').style.display = msg.kind === 'lite' ? 'none' : '';
       if (msg.outputs) updateOutputs(msg.outputs);
       if (msg.ndiSources) updateNdiSources(msg.ndiSources);
       if (msg.audioSinks) updateAudioSinks(msg.audioSinks, msg.audioState);

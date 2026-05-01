@@ -19,6 +19,9 @@ export interface DeviceState {
   audioState: AudioState;
   outputs: OutputInfo[];
   metrics?: Metrics;
+  // 'daemon' = full thin-client; 'lite' = browser-only kiosk with no NDI/audio/VNC.
+  // Defaults to 'daemon' when missing for backward compatibility.
+  kind?: 'daemon' | 'lite';
   lastSeen: number;
   version?: string;
   hasInternet?: boolean;
@@ -44,6 +47,7 @@ export interface WsMessage {
   url?: string;
   output?: string;
   outputs?: OutputInfo[];
+  kind?: 'daemon' | 'lite';
   source?: string;
   sources?: NdiSource[];
   sinks?: AudioSink[];
