@@ -56,7 +56,7 @@
   <div id="unsupported">
     <div class="panel warn">
       <h2>Your browser can't do this</h2>
-      <p>Bluetooth setup needs Web Bluetooth, which only works in <strong>Google Chrome on Android</strong> (or desktop Chrome / Edge). Brave, Firefox, Samsung Internet, and any iOS browser don't support it.</p>
+      <p id="unsupported-note">Bluetooth setup needs Web Bluetooth, which only works in <strong>Google Chrome on Android</strong> (or desktop Chrome / Edge). Brave, Firefox, Samsung Internet, and any iOS browser don't support it.</p>
       <div class="browsers">
         <span>Chrome (Android)</span>
         <span>Chrome (Desktop)</span>
@@ -79,23 +79,33 @@ password=secret</pre>
   <div class="footer">FRC Projector Display</div>
 
 <script>
-  // Feature detection: the launch button only works if the browser exposes
-  // navigator.bluetooth. If it does, load the Improv SDK; otherwise show
-  // the fallback options and skip the dependency entirely.
-  if (navigator.bluetooth) {
-    document.body.classList.add('bt-yes');
-    const s = document.createElement('script');
-    s.type = 'module';
-    s.src = 'https://www.improv-wifi.com/sdk-ble-js/launch-button.js';
-    s.onerror = () => {
-      document.getElementById('fallback-button').onclick = () => {
-        alert('Improv SDK failed to load. Check your internet connection and try again.');
+  // Brave exposes navigator.bluetooth but gates Web Bluetooth behind a flag
+  // and its own permission flow that doesn't behave like Chrome's. The
+  // launch button silently doesn't work for most Brave users. Detect Brave
+  // specifically and route them to the fallback panel.
+  (async () => {
+    let isBrave = false;
+    try { isBrave = await (navigator.brave?.isBrave?.() ?? Promise.resolve(false)); } catch {}
+    const supported = !isBrave && !!navigator.bluetooth;
+    if (supported) {
+      document.body.classList.add('bt-yes');
+      const s = document.createElement('script');
+      s.type = 'module';
+      s.src = 'https://www.improv-wifi.com/sdk-ble-js/launch-button.js';
+      s.onerror = () => {
+        document.getElementById('fallback-button').onclick = () => {
+          alert('Improv SDK failed to load. Check your internet connection and try again.');
+        };
       };
-    };
-    document.head.appendChild(s);
-  } else {
-    document.body.classList.add('bt-no');
-  }
+      document.head.appendChild(s);
+    } else {
+      document.body.classList.add('bt-no');
+      if (isBrave) {
+        const note = document.getElementById('unsupported-note');
+        if (note) note.textContent = 'Brave blocks Web Bluetooth by default. Open this page in Google Chrome on Android instead.';
+      }
+    }
+  })();
 </script>
 </body>
 </html>

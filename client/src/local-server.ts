@@ -5,6 +5,7 @@ import { readFileSync, existsSync } from 'fs';
 import QRCode from 'qrcode';
 import path from 'path';
 import { exec } from 'child_process';
+import { WebSocket } from 'ws';
 import { state } from './state.js';
 import { cdpNavigate } from './cdp.js';
 import { stopAp, startAp, connectWifi, scanWifi, checkInternet } from './wifi.js';
@@ -67,11 +68,11 @@ function trackProbeRedirect(ip: string) {
     if (!ghostClients.has(ip)) return;
     ghostClients.delete(ip);
     if (state.apEscalateImprov || !state.apMode) return;
-    console.log(`[ap] ghost client ${ip} — escalating AP page to BLE/USB`);
+    console.log(`[ap] ghost client ${ip} -> escalating AP page to BLE/USB`);
     state.apEscalateImprov = true;
     // Force a fresh GET so the projector picks up the new page layout
     cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
-  }, 15000);
+  }, 11000);
   ghostClients.set(ip, { timer });
 }
 function clearProbeWatch(ip: string) {
@@ -290,6 +291,15 @@ export async function applyCredentials(
       await restoreAp();
       return { kind: 'error', message: 'Connected to WiFi but no internet; check the password or try again.' };
     }
+    // Force the daemon's WS-to-server to reconnect now instead of waiting out
+    // its exponential backoff (which may have grown to 30s during AP mode).
+    // Without this kick the projector flips to "Configure Display" QR but
+    // the server doesn't know the device is back yet, so scanning the QR
+    // shows "device offline" until reconnectDelay elapses.
+    state.reconnectDelay = 1000;
+    if (state.serverWs && state.serverWs.readyState !== WebSocket.OPEN) {
+      try { state.serverWs.terminate(); } catch {}
+    }
     // Don't await; runPostConnect can take ~minutes (update + restart).
     runPostConnect();
     return { kind: 'online' };
@@ -328,7 +338,11 @@ export async function runPostConnect() {
     console.log('[update] restarting display session');
     exec('sudo systemctl restart lightdm', () => {});
   } else {
-    await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+    // Don't go straight to home QR; that would lie to operators when the
+    // device-to-server WS hasn't actually reconnected yet. Show the connecting
+    // spinner and let the WS-open handler in daemon.ts navigate to / when the
+    // server hand-shake completes.
+    await cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
     state.postConnectInProgress = false;
   }
 }
@@ -505,13 +519,14 @@ async function buildApPageAsync() {
   <div class="alts">
     <div class="alt">
       <strong>Bluetooth setup (recommended)</strong>
-      Scan this QR or visit <code>${wifiSetupUrl.replace(/^https?:\/\//, '')}</code> in Chrome on Android. Phone needs cellular data; no WiFi join required.
+      <p>Scan this QR or visit <code>${wifiSetupUrl.replace(/^https?:\/\//, '')}</code> in Chrome on Android. Phone needs cellular data; no WiFi join required.</p>
       <div class="alt-qr"><img src="${bleQr}" alt="Wi-Fi setup QR"></div>
     </div>
     <div class="alt">
       <strong>USB stick</strong>
-      Plug in a USB drive with a <code>wifi.ini</code> file at the root:<br>
-      <code>ssid=YourNetwork</code><br><code>password=secret</code>
+      <p>Plug in a USB drive with a <code>wifi.ini</code> file at the root:</p>
+      <code class="alt-code">ssid=YourNetwork
+password=secret</code>
     </div>
   </div>`;
   }
@@ -535,8 +550,11 @@ async function buildApPageAsync() {
     font-size:.88rem;color:#9ab;max-width:340px;line-height:1.55;text-align:left}
   .alt strong{color:#4af;display:block;margin-bottom:4px;font-size:.95rem}
   .alt code{background:#000a;padding:1px 6px;border-radius:4px;font-size:.85em;color:#cf8}
-  .alt-qr{background:#fff;padding:8px;border-radius:8px;display:inline-block;margin-top:10px}
+  .alt p{margin:6px 0;color:inherit;font-size:inherit;line-height:inherit}
+  .alt-qr{background:#fff;padding:8px;border-radius:8px;display:block;margin:10px auto 0;width:fit-content}
   .alt-qr img{display:block;width:140px;height:140px}
+  .alt-code{display:block;background:#000a;color:#cf8;padding:8px 10px;border-radius:6px;
+    font-size:.82em;line-height:1.5;margin-top:8px;white-space:pre}
   .version{font-size:.85rem;color:#666;position:fixed;bottom:12px;right:16px}
 </style></head>
 <body>
