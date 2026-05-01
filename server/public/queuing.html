@@ -129,6 +129,10 @@
   .rank-row {
     display: flex; align-items: baseline; gap: 8px; padding: 4px 8px;
     border-radius: 4px;
+    /* Box must be the full column width — without this the auto-margin RP
+       trick pushes RP only to the end of the row's intrinsic content, not
+       to the column edge. */
+    width: 100%;
     /* break-inside avoid: never split a row mid-column */
     break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
   }
@@ -160,18 +164,17 @@
 
   /* ── Matches widget — bottom layout (row of 3 cards) ── */
   .matches-row { display: flex; flex-direction: row; gap: 10px; flex: 1; min-height: 0;
-    overflow: hidden; }
+    overflow: hidden; align-items: stretch; }
   .matches-row .match-card {
     flex: 1 1 0;
     font-size: clamp(0.85rem, 1.4vh, 1.3rem);
-    /* In a row each card is full sidebar height; let the body fill it the
-       same way the sidebar version does */
+    /* Pack content tight to the top of each card — the bottom slot is short,
+       and centering left empty space above and below the alliances. */
+    padding: 8px 12px; gap: 3px;
   }
+  .matches-row .match-card .match-body { justify-content: flex-start; gap: 3px; }
   .matches-row .match-card.on-field {
     flex-grow: 1.4;
-    /* Drop the box-shadow in the row layout — at row gap of 10px the glow
-       bleeds well past the card's apparent border, looking like the bg is
-       overflowing. */
     box-shadow: none;
   }
 
@@ -407,6 +410,7 @@ async function fetchRankings() {
 // don't share an index when both happen to be enabled.
 const rankingsPageIdx = { sidebar: 0, bottom: 0 };
 const SIDEBAR_PAGE_SIZE = 22;
+const BOTTOM_PAGE_SIZE  = 50;
 const RANKINGS_CYCLE_MS = 8000;
 
 function rankRowHtml(r) {
@@ -424,6 +428,7 @@ function rankRowHtml(r) {
 
 function widgetRankings(el, placement) {
   const variant = placement === 'bottom' ? 'bottom' : 'sidebar';
+  const pageSize = variant === 'sidebar' ? SIDEBAR_PAGE_SIZE : BOTTOM_PAGE_SIZE;
   let body, titleSuffix = '';
 
   if (rankingsState.error) {
@@ -432,39 +437,45 @@ function widgetRankings(el, placement) {
     body = '<div class="empty">Loading…</div>';
   } else if (!rankingsState.rows.length) {
     body = '<div class="empty">No rankings yet</div>';
-  } else if (variant === 'sidebar') {
+  } else {
     const rows = rankingsState.rows;
-    const totalPages = Math.max(1, Math.ceil(rows.length / SIDEBAR_PAGE_SIZE));
-    if (rankingsPageIdx.sidebar >= totalPages) rankingsPageIdx.sidebar = 0;
-    const page = rankingsPageIdx.sidebar;
-    const slice = rows.slice(page * SIDEBAR_PAGE_SIZE, (page + 1) * SIDEBAR_PAGE_SIZE);
+    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    const idxRef = variant === 'sidebar' ? 'sidebar' : 'bottom';
+    if (rankingsPageIdx[idxRef] >= totalPages) rankingsPageIdx[idxRef] = 0;
+    const page = rankingsPageIdx[idxRef];
+    const slice = rows.slice(page * pageSize, (page + 1) * pageSize);
     body = slice.map(rankRowHtml).join('');
     if (totalPages > 1) titleSuffix = `<span class="rankings-page-indicator">page ${page + 1}/${totalPages}</span>`;
-  } else {
-    body = rankingsState.rows.map(rankRowHtml).join('');
   }
 
   el.innerHTML = `<div class="col-title">Rankings${titleSuffix}</div>
     <div class="rankings-list ${variant}">${body}</div>`;
 }
 
-// Cycle the sidebar page every 5s with a brief fade. Cycling only triggers
-// while the sidebar widget is rankings AND there's more than one page.
+// Cycle pages every 8s with a fade. Bottom and sidebar each track their own
+// page index in case both slots happen to be rankings.
 let rankingsCycleTimer = null;
 function maybeStartRankingsCycle() {
   if (rankingsCycleTimer) return;
-  if (sidebarKind !== 'rankings') return;
+  const sidebarOn = sidebarKind === 'rankings';
+  const bottomOn  = bottomKind  === 'rankings';
+  if (!sidebarOn && !bottomOn) return;
   rankingsCycleTimer = setInterval(() => {
-    if (!rankingsState.rows || rankingsState.rows.length <= SIDEBAR_PAGE_SIZE) return;
-    const totalPages = Math.ceil(rankingsState.rows.length / SIDEBAR_PAGE_SIZE);
-    rankingsPageIdx.sidebar = (rankingsPageIdx.sidebar + 1) % totalPages;
-    const list = sidebarEl.querySelector('.rankings-list');
-    if (list) {
-      list.classList.add('fade');
-      setTimeout(() => { widgetRankings(sidebarEl, 'sidebar'); }, 420);
-    } else {
-      widgetRankings(sidebarEl, 'sidebar');
-    }
+    if (!rankingsState.rows) return;
+    const flipPage = (slot, size, container) => {
+      if (rankingsState.rows.length <= size) return;
+      const totalPages = Math.ceil(rankingsState.rows.length / size);
+      rankingsPageIdx[slot] = (rankingsPageIdx[slot] + 1) % totalPages;
+      const list = container.querySelector('.rankings-list');
+      if (list) {
+        list.classList.add('fade');
+        setTimeout(() => widgetRankings(container, slot), 420);
+      } else {
+        widgetRankings(container, slot);
+      }
+    };
+    if (sidebarOn) flipPage('sidebar', SIDEBAR_PAGE_SIZE, sidebarEl);
+    if (bottomOn)  flipPage('bottom',  BOTTOM_PAGE_SIZE,  bottomEl);
   }, RANKINGS_CYCLE_MS);
 }
 
@@ -496,12 +507,24 @@ async function pollEvent() {
     (widgets[sidebarKind] || widgets.matches)(sidebarEl, data, 'sidebar');
     (widgets[bottomKind]  || widgets.updates)(bottomEl,  data, 'bottom');
     statusEl.classList.remove('error');
-    statusEl.textContent = `${eventKey} · ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
+    lastSuccessfulFetch = Date.now();
+    updateStatusLine();
   } catch (err) {
     statusEl.classList.add('error');
     statusEl.textContent = 'fetch error: ' + err.message;
   }
 }
+
+// Live-updating status line: shows current time (HH:MM, no seconds) so it
+// keeps ticking between event polls. Updates every 30s — close enough that
+// an HH:MM display never lags more than a tick.
+let lastSuccessfulFetch = 0;
+function updateStatusLine() {
+  if (statusEl.classList.contains('error')) return;
+  const t = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  statusEl.textContent = `${eventKey} · ${t}`;
+}
+setInterval(updateStatusLine, 30000);
 
 async function pollRankings() {
   if (sidebarKind !== 'rankings' && bottomKind !== 'rankings') return;
