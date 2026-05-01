@@ -104,8 +104,11 @@ function connectToServer() {
       const ws = state.serverWs;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (!pongReceived) {
-        log('warn', '[ws] no pong — connection dead, terminating');
-        ws.terminate();
+        // terminate() alone leaves the socket stuck in CLOSING state and the
+        // close event never fires when the TCP path is dead, so no reconnect
+        // gets scheduled. forceWsReconnect tears it all down and starts fresh.
+        log('warn', '[ws] no pong — force reconnecting');
+        state.forceWsReconnect?.();
         return;
       }
       pongReceived = false;
