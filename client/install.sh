@@ -167,11 +167,21 @@ NMDNS
 
 # Static fallback DNS so the daemon can always reach the control server
 # regardless of which network connection (or AP mode) is active.
+# We make the file IMMUTABLE because Debian's dhcpcd hooks (or any other
+# installed network plumbing -- resolvconf, systemd-resolved, etc.) will
+# happily overwrite it with the network's local DNS the next time DHCP
+# fires, which on a Pi-holed LAN means we can't resolve display.filipkin.com
+# from a wifi network that can't route to the Pi-hole.
+chattr -i /etc/resolv.conf 2>/dev/null || true
 cat > /etc/resolv.conf << 'RESOLVCONF'
 # Static; managed by FRC Projector Display install.sh
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 RESOLVCONF
+chattr +i /etc/resolv.conf 2>/dev/null || true
+# Stop dhcpcd if it's been pulled in as a transitive dep (some Debian
+# installer profiles include it even though NM handles DHCP).
+systemctl disable --now dhcpcd 2>/dev/null || true
 systemctl restart NetworkManager 2>/dev/null || true
 # Disable system dnsmasq — it grabs port 53 and prevents NM's built-in dnsmasq
 # from running for the WiFi AP, leaving phones stuck on "obtaining IP address"
