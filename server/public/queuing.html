@@ -35,49 +35,60 @@
   }
 
   /* ── Match cards ── */
-  .matches-list { display: flex; flex-direction: column; gap: 10px;
+  /* Cards use flex:1 to share available vertical space evenly; their internal
+     font sizes scale with the card height so we fit any screen without
+     leaving empty space at the bottom. The hero (on-field) gets a bigger
+     flex share so its emphasis doesn't depend on font tricks alone. */
+  .matches-list { display: flex; flex-direction: column; gap: 8px;
     overflow: hidden; flex: 1; min-height: 0; }
   .match-card {
-    background: #181818; border-radius: 10px; padding: 12px 14px;
+    background: #181818; border-radius: 10px; padding: 10px 14px;
     border-left: 4px solid #555;
-    display: flex; flex-direction: column; gap: 6px;
-    flex-shrink: 0;
+    display: flex; flex-direction: column; gap: 4px;
+    flex: 1 1 0; min-height: 0;
+    overflow: hidden;
+    font-size: clamp(0.85rem, 1.6vh, 1.5rem);
   }
   .match-card .header {
     display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
   }
-  .match-card .label { font-size: 1.4rem; font-weight: 800; color: #fff; line-height: 1; }
-  .match-card .status { font-size: 0.72rem; color: #888;
-    text-transform: uppercase; letter-spacing: 0.1em; font-weight: 700; }
-  .match-card .alliance { display: flex; align-items: center; gap: 6px; font-size: 1.1rem; }
-  .match-card .alliance-tag { width: 36px; flex-shrink: 0; font-size: 0.7rem; font-weight: 800;
-    letter-spacing: 0.08em; opacity: 0.8; padding: 3px 0; text-align: center; border-radius: 3px; }
+  .match-card .label  { font-size: 1.6em; font-weight: 800; color: #fff; line-height: 1; }
+  .match-card .status { font-size: 0.7em; color: #888;
+    text-transform: uppercase; letter-spacing: 0.1em; font-weight: 700; white-space: nowrap; }
+  .match-card .alliance { display: flex; align-items: center; gap: 8px; }
+  .match-card .alliance-tag { width: 3em; flex-shrink: 0; font-size: 0.7em; font-weight: 800;
+    letter-spacing: 0.08em; padding: 3px 0; text-align: center; border-radius: 3px; }
   .match-card .red-tag  { background: #6b1717; color: #fcc; }
   .match-card .blue-tag { background: #19306b; color: #cdf; }
-  .match-card .teams { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+  .match-card .teams { display: flex; gap: 5px; flex-wrap: wrap; flex: 1; }
   .match-card .team {
-    padding: 4px 8px; border-radius: 4px;
-    font-weight: 700; font-variant-numeric: tabular-nums; font-size: 1.05rem;
+    width: 4.2em;             /* fixed: fits 5 digits at any zoom */
+    padding: 3px 0;
+    border-radius: 4px;
+    text-align: center;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    font-size: 1.4em;
+    line-height: 1.15;
   }
   .match-card .red  .team { background: #3a0d0d; color: #f88; }
   .match-card .blue .team { background: #0d1f3a; color: #8af; }
-  .match-card .when { font-size: 0.78rem; color: #777; padding-top: 2px; }
+  .match-card .when { font-size: 0.72em; color: #777; padding-top: 2px; }
 
-  /* On Field — biggest, orange highlight */
+  /* On Field — hero: bigger flex share + accents */
   .match-card.on-field {
-    border-left-color: #fa0;
-    border: 2px solid #fa0;
-    background: #1a1408;
-    box-shadow: 0 0 24px #fa04;
+    flex-grow: 1.6;
+    border: 2px solid #fa0; background: #1a1408;
+    box-shadow: 0 0 24px #fa04; border-left-color: #fa0;
   }
-  .match-card.on-field .label  { font-size: 2rem; color: #fc4; }
-  .match-card.on-field .status { color: #fa0; font-size: 0.85rem; }
-  .match-card.on-field .alliance { font-size: 1.3rem; }
-  .match-card.on-field .team { font-size: 1.2rem; padding: 5px 10px; }
+  .match-card.on-field .label  { font-size: 2.2em; color: #fc4; }
+  .match-card.on-field .status { color: #fa0; font-size: 0.85em; }
+  .match-card.on-field .team   { font-size: 1.7em; }
+  .match-card.on-field .alliance-tag { font-size: 0.85em; }
 
   /* On Deck */
-  .match-card.on-deck { border-left-color: #4af; }
-  .match-card.on-deck .status { color: #4af; }
+  .match-card.on-deck     { border-left-color: #4af; }
+  .match-card.on-deck     .status { color: #4af; }
 
   /* Now Queuing */
   .match-card.now-queuing { border-left-color: #6f6; }
