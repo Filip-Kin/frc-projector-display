@@ -77,23 +77,25 @@ function connectToServer() {
 
     state.serverWs!.send(JSON.stringify({ type: 'register', pin: PIN }));
 
-    // Heartbeat + WS-level ping so ethernet drops are detected quickly.
-    // If no pong arrives within 8s, terminate the socket — triggers the close
-    // handler and starts the AP/reconnect cycle.
+    // WS-level ping every 5s; if no pong within 4s, the connection is dead.
+    // Detects ethernet drops in under 10s instead of waiting for the kernel's
+    // multi-minute TCP timeout. Heartbeat with version sent every 30s.
     let pongReceived = true;
+    let pingTick = 0;
     state.serverWs!.on('pong', () => { pongReceived = true; });
     heartbeatInterval = setInterval(() => {
       const ws = state.serverWs;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (!pongReceived) {
-        log('warn', '[ws] no pong received — connection dead, terminating');
+        log('warn', '[ws] no pong — connection dead, terminating');
         ws.terminate();
         return;
       }
       pongReceived = false;
       ws.ping();
-      ws.send(JSON.stringify({ type: 'heartbeat', version: VERSION }));
-    }, 30000);
+      // Send heartbeat every 6 ticks (30s) so admin panel "last seen" stays fresh
+      if (++pingTick % 6 === 0) ws.send(JSON.stringify({ type: 'heartbeat', version: VERSION }));
+    }, 5000);
     // Initial scan immediately on connect, then every 20s
     const sendNdi = async () => {
       const sources = await getNdiSources();
@@ -177,17 +179,19 @@ function connectToServer() {
         cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
       }
 
+      // 5s grace period — gives reconnect a chance for transient blips
+      // before tearing down to AP mode
       state.networkCheckTimer = setTimeout(async () => {
         state.networkCheckTimer = null;
         if (state.apMode || state.serverWs?.readyState === WebSocket.OPEN) return;
-        // Still no connection after 30s — skip AP if NDI stream is still running
+        // NDI still running → don't interrupt the stream
         const ndiStillActive = state.currentMode === 'ndi' && state.ndiProcess !== null;
         if (ndiStillActive) {
           log('info', '[ws] connection lost but NDI stream active — not entering AP mode');
           return;
         }
         await enterApMode();
-      }, 30000);
+      }, 5000);
     }
   });
 
