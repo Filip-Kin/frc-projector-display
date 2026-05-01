@@ -202,10 +202,10 @@ function buildQrPage(qrDataUrl: string) {
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>FRC Display</title>
 <style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:28px}h1{font-size:2.4rem;font-weight:700;letter-spacing:.02em}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #4af4}.qr-box img{display:block;width:280px;height:280px}.pin-label{font-size:1rem;color:#aaa;margin-bottom:4px}.pin{font-size:3rem;font-weight:800;letter-spacing:.25em;color:#4af}.url{font-size:.85rem;color:#555;word-break:break-all;text-align:center;max-width:480px}.version{font-size:.75rem;color:#333;position:fixed;bottom:12px;right:16px}</style>
 </head><body>
-<h1>FRC Display</h1>
+<h1>Configure Display</h1>
 <div class="qr-box"><img src="${qrDataUrl}" alt="QR"></div>
 <div><div class="pin-label">PIN</div><div class="pin">${PIN}</div></div>
-<div class="url">${CONTROL_URL}</div>
+<div class="url">${SERVER_BASE.replace(/^https?:\/\//, '')}</div>
 <div class="version">v${VERSION}</div>
 </body></html>`;
 }

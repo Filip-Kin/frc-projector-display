@@ -131,6 +131,9 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
 echo "[8] Configuring NetworkManager..."
 systemctl enable NetworkManager 2>/dev/null || true
 systemctl start NetworkManager 2>/dev/null || true
+# Disable system dnsmasq — it grabs port 53 and prevents NM's built-in dnsmasq
+# from running for the WiFi AP, leaving phones stuck on "obtaining IP address"
+systemctl disable --now dnsmasq 2>/dev/null || true
 mkdir -p /etc/NetworkManager/dnsmasq-shared.d
 cat > /etc/NetworkManager/dnsmasq-shared.d/captive.conf << 'NMCONF'
 # Redirect all DNS to the AP IP when in shared (hotspot) mode — triggers
