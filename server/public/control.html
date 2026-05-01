@@ -400,6 +400,22 @@
       <button type="button" id="qs-size-60" class="secondary" onclick="setQueuingSize(60)" style="flex:1;padding:9px;font-size:0.85rem">60%</button>
     </div>
 
+    <label style="margin-top:14px">Sidebar (left, full height)</label>
+    <select id="queuing-sidebar">
+      <option value="matches">Matches</option>
+      <option value="updates">Updates (announcements + parts)</option>
+      <option value="rankings">Rankings</option>
+      <option value="none">— empty —</option>
+    </select>
+
+    <label style="margin-top:10px">Bottom (under stream)</label>
+    <select id="queuing-bottom">
+      <option value="updates">Updates (announcements + parts)</option>
+      <option value="matches">Matches</option>
+      <option value="rankings">Rankings</option>
+      <option value="none">— empty —</option>
+    </select>
+
     <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
   </div>
 
@@ -709,8 +725,11 @@ function applyMode() {
         if (!streamSource) { toast('Select an NDI source'); return; }
         if (streamSource.startsWith('omt://')) { toast('OMT not supported yet'); return; }
       }
+      const sidebar = document.getElementById('queuing-sidebar').value;
+      const bottom  = document.getElementById('queuing-bottom').value;
       msg = { type: 'set_mode', mode: 'queuing', eventKey,
-              streamType: queuingStream, streamSource, streamSize: queuingSize };
+              streamType: queuingStream, streamSource, streamSize: queuingSize,
+              sidebar, bottom };
       break;
     }
     default: toast('Select a mode first'); return;

@@ -42,6 +42,8 @@ export async function setQueuingOnOutput(
   streamType: 'youtube' | 'ndi',
   streamSource: string,
   size: number = 70,
+  sidebar: string = 'matches',
+  bottom: string = 'updates',
 ) {
   const o = getOutput(outputId); if (!o) return;
   await stopNdiOnOutput(o);
@@ -50,6 +52,8 @@ export async function setQueuingOnOutput(
   u.searchParams.set('event', eventKey);
   u.searchParams.set('stream', streamType);
   u.searchParams.set('size', String(size));
+  u.searchParams.set('sidebar', sidebar);
+  u.searchParams.set('bottom',  bottom);
   if (streamType === 'youtube') u.searchParams.set('streamId', streamSource);
 
   o.mode = 'queuing';

@@ -171,6 +171,8 @@ function connectToServer() {
             msg.streamType === 'ndi' ? 'ndi' : 'youtube',
             msg.streamSource ?? '',
             msg.streamSize === 60 ? 60 : 70,
+            msg.sidebar ?? 'matches',
+            msg.bottom  ?? 'updates',
           );
         }
         break;

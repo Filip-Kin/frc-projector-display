@@ -49,6 +49,38 @@ export function registerRoutes(app: Application) {
     });
   });
 
+  // TBA rankings proxy — projector queuing pages call this for the rankings
+  // widget. Caches per eventKey for 30s (rankings change slowly).
+  const rankingsCache = new Map<string, { ts: number; body: string; status: number }>();
+  app.get('/api/tba/rankings/:eventKey', (req, res) => {
+    const apiKey = process.env.TBA_API_KEY;
+    const key = req.params.eventKey;
+    if (!apiKey) { res.status(503).json({ error: 'TBA_API_KEY not set on server' }); return; }
+    if (!/^[a-z0-9]+$/i.test(key)) { res.status(400).json({ error: 'bad event key' }); return; }
+
+    const cached = rankingsCache.get(key);
+    if (cached && Date.now() - cached.ts < 30000) {
+      res.status(cached.status).type('application/json').send(cached.body);
+      return;
+    }
+
+    https.get({
+      hostname: 'www.thebluealliance.com',
+      path: `/api/v3/event/${encodeURIComponent(key)}/rankings`,
+      headers: { 'X-TBA-Auth-Key': apiKey, 'User-Agent': 'frc-projector-display' },
+    }, (r) => {
+      let data = '';
+      r.on('data', (c: string) => data += c);
+      r.on('end', () => {
+        const status = r.statusCode ?? 502;
+        rankingsCache.set(key, { ts: Date.now(), body: data, status });
+        res.status(status).type('application/json').send(data);
+      });
+    }).on('error', (err) => {
+      res.status(502).json({ error: err.message });
+    });
+  });
+
   // Nexus events proxy
   app.get('/api/nexus/events', (_req, res) => {
     const apiKey = process.env.NEXUS_API_KEY;
