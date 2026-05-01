@@ -5,7 +5,7 @@ import { cdpNavigate } from './cdp.js';
 import { setHome, setChromium, setNdi, setVnc, startX11vncDaemon, setPin } from './modes.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
-import { localServer, httpsServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
+import { localServer, httpsServer, LOCAL_PORT, enterApMode, initServer, stopProvisioningExtras } from './local-server.js';
 import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
 import { startNetworkMonitor } from './network-monitor.js';
 
@@ -72,6 +72,7 @@ function connectToServer() {
       const { stopAp } = await import('./wifi.js');
       if (state.apIface) await stopAp(state.apIface).catch(() => {});
       state.apMode = false; state.apIface = null;
+      await stopProvisioningExtras();
     }
     // Navigate to home QR page now that we have a connection
     await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
@@ -180,15 +181,21 @@ function connectToServer() {
         cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
       }
 
-      // 5s grace period — gives reconnect a chance for transient blips
-      // before tearing down to AP mode
+      // 5s grace period; gives reconnect a chance for transient blips
+      // before tearing down to AP mode.
       state.networkCheckTimer = setTimeout(async () => {
         state.networkCheckTimer = null;
         if (state.apMode || state.serverWs?.readyState === WebSocket.OPEN) return;
-        // NDI still running → don't interrupt the stream
+        // NDI still running -> don't interrupt the stream
         const ndiStillActive = state.currentMode === 'ndi' && state.ndiProcess !== null;
         if (ndiStillActive) {
-          log('info', '[ws] connection lost but NDI stream active — not entering AP mode');
+          log('info', '[ws] connection lost but NDI stream active; not entering AP mode');
+          return;
+        }
+        // applyCredentials in flight -> don't interrupt; it'll either succeed
+        // (WS will reconnect) or fail and restore AP itself
+        if (state.applyingCredentials) {
+          log('info', '[ws] connection lost but applyCredentials running; deferring AP mode');
           return;
         }
         await enterApMode();
@@ -270,12 +277,28 @@ runNetworkStartup();  // boot-time: 15s grace, then maybe AP
 let routeMissingSince: number | null = null;
 let routeOfflineTimer: ReturnType<typeof setTimeout> | null = null;
 
-startNetworkMonitor((hasRoute, reason) => {
-  log('info', `[net] route change → ${hasRoute ? 'UP' : 'DOWN'} (${reason})`);
+startNetworkMonitor(async (hasRoute, reason) => {
+  log('info', `[net] route change -> ${hasRoute ? 'UP' : 'DOWN'} (${reason})`);
 
   if (hasRoute) {
     routeMissingSince = null;
     if (routeOfflineTimer) { clearTimeout(routeOfflineTimer); routeOfflineTimer = null; }
+    // If we're in AP mode and a real route just came back (e.g. ethernet
+    // reconnected), bail out of AP mode now. The WS-open auto-exit can't
+    // fire here because the AP's dnsmasq is still hijacking DNS for our own
+    // host -> WS to display.filipkin.com fails until we stop the AP.
+    if (state.apMode && !state.postConnectInProgress) {
+      const route = reason.match(/route via (\S+)/)?.[1];
+      // Don't exit on routes through our own AP iface
+      if (route && route !== state.apIface) {
+        log('info', `[net] route restored via ${route} -> exiting AP mode`);
+        const { stopAp } = await import('./wifi.js');
+        if (state.apIface) await stopAp(state.apIface).catch(() => {});
+        state.apMode = false; state.apIface = null;
+        await stopProvisioningExtras();
+        cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+      }
+    }
     return;
   }
 

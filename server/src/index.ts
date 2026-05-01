@@ -34,6 +34,7 @@ app.use('/api/admin', adminRouter);
 // App routes
 app.get('/', (_req, res) => res.redirect('/control'));
 app.get('/control', (_req, res) => res.sendFile(join(import.meta.dir, '../public/control.html')));
+app.get('/wifi', (_req, res) => res.sendFile(join(import.meta.dir, '../public/wifi.html')));
 app.get('/vnc/:pin', (_req, res) => res.sendFile(join(import.meta.dir, '../public/vnc.html')));
 
 // Distribution + misc routes

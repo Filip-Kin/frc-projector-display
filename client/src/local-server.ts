@@ -10,6 +10,8 @@ import { cdpNavigate } from './cdp.js';
 import { stopAp, startAp, connectWifi, scanWifi, checkInternet } from './wifi.js';
 import { getEthernetInterface, getEthernetStatus, applyDhcp, applyCustomStaticIp } from './network.js';
 import { setHome, stopNdi, stopVnc } from './modes.js';
+import { startImprov, stopImprov } from './improv.js';
+import { startUsbWatcher, stopUsbWatcher } from './usb-provisioning.js';
 
 export const LOCAL_PORT = parseInt(process.env.LOCAL_PORT ?? '3000', 10);
 export const AP_IP = '192.168.4.1';
@@ -51,6 +53,37 @@ app.use((req, res, next) => {
   next();
 });
 
+// Adaptive escalation: if a phone hits a captive-detection probe (we redirect
+// it to /) but never actually GETs / within ~15s, it's the Android-disassoc
+// signature. After 1 such ghost client we flip the AP page to lead with the
+// BLE/USB alternatives.
+interface GhostWatch { timer: ReturnType<typeof setTimeout>; }
+const ghostClients = new Map<string, GhostWatch>();
+
+function trackProbeRedirect(ip: string) {
+  if (!state.apMode || state.apEscalateImprov) return;
+  if (ghostClients.has(ip)) return;
+  const timer = setTimeout(() => {
+    if (!ghostClients.has(ip)) return;
+    ghostClients.delete(ip);
+    if (state.apEscalateImprov || !state.apMode) return;
+    console.log(`[ap] ghost client ${ip} — escalating AP page to BLE/USB`);
+    state.apEscalateImprov = true;
+    // Force a fresh GET so the projector picks up the new page layout
+    cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
+  }, 15000);
+  ghostClients.set(ip, { timer });
+}
+function clearProbeWatch(ip: string) {
+  const e = ghostClients.get(ip);
+  if (e) { clearTimeout(e.timer); ghostClients.delete(ip); }
+}
+export function resetEscalation() {
+  for (const e of ghostClients.values()) clearTimeout(e.timer);
+  ghostClients.clear();
+  state.apEscalateImprov = false;
+}
+
 // AP-mode captive portal: redirect any non-local request to our setup page.
 // This triggers the "Sign in to network" notification on phones.
 //
@@ -63,6 +96,8 @@ app.use((req, res, next) => {
   if (host === AP_IP || host === 'localhost' || host === '127.0.0.1') {
     return next();
   }
+  const ip = (req.ip ?? req.socket.remoteAddress ?? '').replace('::ffff:', '');
+  if (ip && ip !== '127.0.0.1') trackProbeRedirect(ip);
   res.setHeader('Cache-Control', 'no-store');
   return res.redirect(302, `http://${AP_IP}/`);
 });
@@ -85,6 +120,10 @@ app.get('/', async (req, res) => {
     // (clean URL the captive portal browser was redirected to)
     const host = (req.get('host') ?? '').split(':')[0];
     if (host === AP_IP) {
+      // Phone successfully reached the setup page — clear the ghost-client
+      // watch so we don't escalate when the captive portal worked fine.
+      const ip = (req.ip ?? req.socket.remoteAddress ?? '').replace('::ffff:', '');
+      if (ip) clearProbeWatch(ip);
       return res.send(buildSetupPage(cachedNetworks));
     }
     // Local Chromium kiosk on projector → show the two-step setup screen
@@ -102,6 +141,7 @@ app.get('/youtube', (req, res) => {
 
 app.get('/connecting', (_req, res) => res.send(buildConnectingPage()));
 app.get('/no-connection', (_req, res) => res.send(buildNoConnectionPage()));
+app.get('/identify', (_req, res) => res.send(buildIdentifyPage()));
 
 // Phone-friendly request log viewer — open http://192.168.4.1:3000/debug-log
 // to see every request hitting the daemon in real time
@@ -196,49 +236,77 @@ app.get('/setup', async (_req, res) => {
   res.send(buildSetupPage(networks));
 });
 
+// Unified credential-apply pipeline used by all three provisioning paths
+// (captive portal, Improv BLE, USB). Returns a tagged result the caller maps
+// to its own response format. On failure, AP + BLE + USB watcher are restored
+// so the user can try again.
+type ApplyResult =
+  | { kind: 'online' }
+  | { kind: 'captive_portal'; portalUrl: string }
+  | { kind: 'error'; message: string };
+
+export async function applyCredentials(
+  ssid: string, password: string, source: string,
+  onMessage?: (msg: string) => void | Promise<void>,
+): Promise<ApplyResult> {
+  console.log(`[setup] applying credentials from ${source}: SSID="${ssid}"`);
+  state.applyingCredentials = true;
+  try {
+    if (state.apIface) {
+      await stopAp(state.apIface).catch(() => {});
+      state.apMode = false;
+    }
+
+    const restoreAp = async () => {
+      if (!state.apIface) return;
+      state.apMode = true;
+      await startAp(PIN, state.apIface).catch(() => {});
+      await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+    };
+
+    if (onMessage) await onMessage(`Connecting to "${ssid}"...`);
+    try {
+      await connectWifi(ssid, password);
+    } catch {
+      await restoreAp();
+      return { kind: 'error', message: 'Could not connect; check SSID and password.' };
+    }
+
+    if (onMessage) await onMessage('Checking connection...');
+    let result = { online: false, portalUrl: null as string | null };
+    // 8 × 2s = 16s. A healthy network passes the first check; if 16s of polls
+    // all fail, more polling won't help.
+    for (let i = 0; i < 8; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      result = await checkInternet();
+      if (result.online || result.portalUrl) break;
+    }
+
+    if (result.portalUrl) {
+      await cdpNavigate(result.portalUrl).catch(() => {});
+      return { kind: 'captive_portal', portalUrl: result.portalUrl };
+    }
+    if (!result.online) {
+      await restoreAp();
+      return { kind: 'error', message: 'Connected to WiFi but no internet; check the password or try again.' };
+    }
+    // Don't await; runPostConnect can take ~minutes (update + restart).
+    runPostConnect();
+    return { kind: 'online' };
+  } finally {
+    state.applyingCredentials = false;
+  }
+}
+
 app.post('/setup', async (req, res) => {
   const { ssid, password } = req.body as { ssid?: string; password?: string };
   if (!ssid) { res.status(400).json({ error: 'SSID required' }); return; }
-
-  if (state.apIface) {
-    await stopAp(state.apIface).catch(() => {});
-    state.apMode = false;
-  }
-
-  try {
-    await connectWifi(ssid, password ?? '');
-  } catch {
-    if (state.apIface) {
-      state.apMode = true;
-      await startAp(PIN, state.apIface).catch(() => {});
-      await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
-    }
-    return res.json({ status: 'error', message: 'Could not connect — check SSID and password' });
-  }
-
-  let result = { online: false, portalUrl: null as string | null };
-  for (let i = 0; i < 15; i++) {
-    await new Promise(r => setTimeout(r, 2000));
-    result = await checkInternet();
-    if (result.online || result.portalUrl) break;
-  }
-
-  if (result.portalUrl) {
-    await cdpNavigate(result.portalUrl).catch(() => {});
-    return res.json({ status: 'captive_portal', portalUrl: result.portalUrl, pin: PIN });
-  }
-
-  if (!result.online) {
-    if (state.apIface) {
-      state.apMode = true;
-      await startAp(PIN, state.apIface).catch(() => {});
-      await cdpNavigate(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
-    }
-    return res.json({ status: 'error', message: 'Connected to WiFi but no internet — check password or try again' });
-  }
-
-  res.json({ status: 'online' });
-  runPostConnect();
+  const r = await applyCredentials(ssid, password ?? '', 'captive');
+  // On any success-ish outcome, tear down BLE + USB watcher (still running)
+  if (r.kind === 'online' || r.kind === 'captive_portal') await stopProvisioningExtras();
+  if (r.kind === 'online')         res.json({ status: 'online' });
+  else if (r.kind === 'captive_portal') res.json({ status: 'captive_portal', portalUrl: r.portalUrl, pin: PIN });
+  else                              res.json({ status: 'error', message: r.message });
 });
 
 export async function runPostConnect() {
@@ -267,7 +335,13 @@ export async function runPostConnect() {
 
 export async function enterApMode() {
   console.log('[ap] === enterApMode called ===');
-  console.log(`[ap] currentMode=${state.currentMode} ndi=${!!state.ndiProcess} apMode=${state.apMode}`);
+  console.log(`[ap] currentMode=${state.currentMode} ndi=${!!state.ndiProcess} apMode=${state.apMode} applyingCredentials=${state.applyingCredentials}`);
+  // applyCredentials is mid-flight; bringing the AP back up would steal the
+  // wifi adapter from the connection it just established and brick the test.
+  if (state.applyingCredentials) {
+    console.log('[ap] skipping; applyCredentials is in flight');
+    return;
+  }
 
   // Stop any active media — ndi-play covers Chromium fullscreen so clear it first
   await stopNdi();
@@ -303,10 +377,84 @@ export async function enterApMode() {
     console.log('[ap] hotspot ACTIVE — navigating to AP page');
     await cdpNavigate(`http://localhost:${LOCAL_PORT}/`);
     console.log('[ap] navigation complete');
+    await startProvisioningExtras();
   } catch (err: any) {
     console.error(`[ap] FAILED to start: ${err.message}`);
     await cdpNavigate(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
   }
+}
+
+// Tear down BLE + USB watcher (used both on credential success and on
+// auto-exit from AP mode when ethernet reconnects).
+export async function stopProvisioningExtras() {
+  await stopImprov().catch(() => {});
+  stopUsbWatcher();
+  resetEscalation();
+}
+
+// Start the BLE Improv server + USB watcher alongside the captive-portal AP.
+// Errors here are non-fatal — the captive portal still works without them.
+async function startProvisioningExtras() {
+  // BLE Improv — Android Chrome users can use improv-wifi.com
+  const localName = AP_SSID;
+  const redirectUrl = CONTROL_URL;
+  startImprov({
+    localName,
+    redirectUrl,
+    onCredentials: async (ssid, password) => {
+      await setProvisioningStatus({ source: 'improv', ssid, phase: 'connecting', message: `Connecting to "${ssid}"...` });
+      const r = await applyCredentials(ssid, password, 'improv', async (msg) => {
+        await setProvisioningStatus({ source: 'improv', ssid, phase: 'connecting', message: msg });
+      });
+      const ok = r.kind === 'online' || r.kind === 'captive_portal';
+      if (!ok) {
+        await setProvisioningStatus({ source: 'improv', ssid, phase: 'failed', message: r.kind === 'error' ? r.message : undefined });
+        setTimeout(() => { if (state.provisioningStatus?.phase === 'failed') clearProvisioningStatus(); }, 5000);
+      } else {
+        await clearProvisioningStatus();
+      }
+      return { success: ok };
+    },
+    onIdentify: async () => {
+      // Flash a fullscreen "this is me" page for 3s so the operator can pick
+      // the right device out of a fleet from the BLE picker.
+      await cdpNavigate(`http://localhost:${LOCAL_PORT}/identify`).catch(() => {});
+      setTimeout(() => {
+        if (!state.apMode) return;
+        // After the flash, return to whatever AP-mode page is current
+        cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
+      }, 3000);
+    },
+    onProvisionedDone: async () => {
+      // PROVISIONED notify has already gone out; safe to tear everything down.
+      await stopProvisioningExtras();
+    },
+  }).catch(err => console.error(`[improv] start failed: ${err?.message ?? err}`));
+
+  // USB drop: wifi.ini at root of any USB stick
+  startUsbWatcher(async (ssid, password) => {
+    await setProvisioningStatus({ source: 'usb', ssid, phase: 'connecting', message: `Connecting to "${ssid}"...` });
+    const r = await applyCredentials(ssid, password, 'usb', async (msg) => {
+      await setProvisioningStatus({ source: 'usb', ssid, phase: 'connecting', message: msg });
+    });
+    if (r.kind === 'online' || r.kind === 'captive_portal') {
+      await clearProvisioningStatus();
+      await stopProvisioningExtras();
+    } else {
+      await setProvisioningStatus({ source: 'usb', ssid, phase: 'failed', message: r.kind === 'error' ? r.message : undefined });
+      setTimeout(() => { if (state.provisioningStatus?.phase === 'failed') clearProvisioningStatus(); }, 5000);
+    }
+  }).catch(err => console.error(`[usb] start failed: ${err?.message ?? err}`));
+}
+
+async function setProvisioningStatus(s: NonNullable<typeof state.provisioningStatus>) {
+  state.provisioningStatus = s;
+  // Force a fresh render so the projector picks up the status screen
+  await cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
+}
+async function clearProvisioningStatus() {
+  state.provisioningStatus = null;
+  await cdpNavigate(`http://localhost:${LOCAL_PORT}/?_=${Date.now()}`).catch(() => {});
 }
 
 export const localServer = createServer(app);
@@ -336,34 +484,101 @@ function buildQrPage(qrDataUrl: string) {
 }
 
 async function buildApPageAsync() {
+  // Out-of-band provisioning in flight (USB plugged in, BLE creds received) ->
+  // show a status screen instead so operators get feedback during the 15-30s
+  // connect attempt instead of staring at a frozen QR page.
+  if (state.provisioningStatus) {
+    return buildProvisioningStatusPage(state.provisioningStatus);
+  }
   const wifiQr = await QRCode.toDataURL(`WIFI:T:nopass;S:${AP_SSID};;`,
-    { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
+    { width: 280, margin: 2, color: { dark: '#000', light: '#fff' } });
+  // Standard captive-portal page is primary; the BLE/USB alternatives only
+  // appear once we've detected a phone bouncing off the captive portal.
+  const escalated = state.apEscalateImprov;
+  const wifiSetupUrl = `${SERVER_BASE}/wifi`;
+  let altsBlock = '';
+  if (escalated) {
+    const bleQr = await QRCode.toDataURL(wifiSetupUrl,
+      { width: 200, margin: 2, color: { dark: '#000', light: '#fff' } });
+    altsBlock = `
+  <div class="alts-title">Phone disconnecting? Try one of these instead:</div>
+  <div class="alts">
+    <div class="alt">
+      <strong>Bluetooth setup (recommended)</strong>
+      Scan this QR or visit <code>${wifiSetupUrl.replace(/^https?:\/\//, '')}</code> in Chrome on Android. Phone needs cellular data; no WiFi join required.
+      <div class="alt-qr"><img src="${bleQr}" alt="Wi-Fi setup QR"></div>
+    </div>
+    <div class="alt">
+      <strong>USB stick</strong>
+      Plug in a USB drive with a <code>wifi.ini</code> file at the root:<br>
+      <code>ssid=YourNetwork</code><br><code>password=secret</code>
+    </div>
+  </div>`;
+  }
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WiFi Setup</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:#111;color:#f0f0f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
     min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
-    padding:32px 24px;gap:20px}
+    padding:24px;gap:16px}
   h1{font-size:2.2rem;font-weight:800;color:#fa0;letter-spacing:.02em}
-  .qr{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #fa04}
-  .qr img{display:block;width:280px;height:280px}
-  .ssid{font-size:1.6rem;font-weight:700;letter-spacing:.06em;color:#fa0}
-  .hint{font-size:1rem;color:#bbb;text-align:center;max-width:560px;line-height:1.55}
-  .tips{background:#1a1f2e;border:1px solid #2c3a55;border-radius:10px;padding:12px 18px;
-    font-size:.85rem;color:#9ab;text-align:center;max-width:560px;line-height:1.6;margin-top:8px}
+  .qr{background:#fff;padding:14px;border-radius:14px;box-shadow:0 0 60px #fa04}
+  .qr img{display:block;width:260px;height:260px}
+  .ssid{font-size:1.5rem;font-weight:700;letter-spacing:.06em;color:#fa0}
+  .hint{font-size:1rem;color:#bbb;text-align:center;max-width:620px;line-height:1.5}
+  .tips{background:#1a1f2e;border:1px solid #2c3a55;border-radius:10px;padding:10px 18px;
+    font-size:.85rem;color:#9ab;text-align:center;max-width:620px;line-height:1.55}
   .tips strong{color:#4af}
-  .version{font-size:.85rem;color:#666;position:fixed;bottom:14px;right:18px}
+  .alts-title{margin-top:6px;font-size:1rem;font-weight:700;color:#fc6}
+  .alts{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;max-width:780px}
+  .alt{background:#1a1f2e;border:1px solid #2c3a55;border-radius:10px;padding:12px 16px;
+    font-size:.88rem;color:#9ab;max-width:340px;line-height:1.55;text-align:left}
+  .alt strong{color:#4af;display:block;margin-bottom:4px;font-size:.95rem}
+  .alt code{background:#000a;padding:1px 6px;border-radius:4px;font-size:.85em;color:#cf8}
+  .alt-qr{background:#fff;padding:8px;border-radius:8px;display:inline-block;margin-top:10px}
+  .alt-qr img{display:block;width:140px;height:140px}
+  .version{font-size:.85rem;color:#666;position:fixed;bottom:12px;right:16px}
 </style></head>
 <body>
   <h1>WiFi Setup</h1>
   <div class="qr"><img src="${wifiQr}" alt="WiFi QR"></div>
   <div class="ssid">${AP_SSID}</div>
-  <div class="hint">Scan to join the network. A "Sign in to network" notification will appear — tap it to open the setup page.</div>
+  <div class="hint">Scan to join the network. A "Sign in to network" notification will appear; tap it to open the setup page.</div>
   <div class="tips">
-    <strong>Trouble staying connected?</strong><br>
-    On Android: Settings → Network &amp; Internet → "Switch to mobile data automatically" → OFF.<br>
-    Also forget any other saved WiFi networks that might be in range.
+    <strong>Trouble staying connected?</strong> Try turning off mobile data.
   </div>
+  ${altsBlock}
+  <div class="version">v${VERSION}</div>
+</body></html>`;
+}
+
+// Shown on the projector while a USB or BLE provisioning attempt is in flight.
+function buildProvisioningStatusPage(status: { source: 'usb' | 'improv'; ssid: string; phase: 'connecting' | 'failed'; message?: string }) {
+  const sourceLabel = status.source === 'usb' ? 'USB drive' : 'Bluetooth (Improv)';
+  const isFailed = status.phase === 'failed';
+  const msg = status.message ?? (isFailed
+    ? 'Could not connect. The setup screen will return shortly.'
+    : `Connecting to "${status.ssid}"...`);
+  const headColor = isFailed ? '#f55' : '#4af';
+  const accent    = isFailed ? '#822' : '#345';
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Provisioning</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#111;color:#f0f0f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:24px}
+  .src{font-size:.85rem;text-transform:uppercase;letter-spacing:.18em;color:#888}
+  h1{font-size:2rem;font-weight:800;color:${headColor};letter-spacing:.02em;text-align:center;max-width:720px}
+  .spinner{width:56px;height:56px;border:5px solid ${accent};border-top-color:${headColor};
+    border-radius:50%;animation:spin 0.9s linear infinite;${isFailed ? 'display:none;' : ''}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .msg{font-size:1.1rem;color:#bbb;max-width:620px;text-align:center;line-height:1.5}
+  .version{font-size:.85rem;color:#666;position:fixed;bottom:12px;right:16px}
+</style></head>
+<body>
+  <div class="src">${sourceLabel}</div>
+  <div class="spinner"></div>
+  <h1>${isFailed ? 'Provisioning failed' : 'Credentials received'}</h1>
+  <div class="msg">${msg}</div>
   <div class="version">v${VERSION}</div>
 </body></html>`;
 }
@@ -373,20 +588,16 @@ function signalBars(s: number) {
 }
 
 function buildSetupPage(networks: { ssid: string; signal: number; secured: boolean }[]) {
-  const netRows = networks.map(n => `<div class="net-row" onclick="selectNetwork('${n.ssid.replace(/'/g,"\\'")}')"><span class="bars">${signalBars(n.signal)}</span><span class="net-name">${n.ssid.replace(/</g,'&lt;')}</span>${n.secured ? '<span>🔒</span>' : ''}</div>`).join('');
+  const netRows = networks.map(n => `<div class="net-row" onclick="selectNetwork('${n.ssid.replace(/'/g,"\\'")}')"><span class="bars">${signalBars(n.signal)}</span><span class="net-name">${n.ssid.replace(/</g,'&lt;')}</span>${n.secured ? '<span class="lock">lock</span>' : ''}</div>`).join('');
   return `<!DOCTYPE html><html lang="en"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>WiFi Setup</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{background:#111;color:#f0f0f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:16px;min-height:100vh}h1{font-size:1.3rem;font-weight:700;color:#fa0;margin-bottom:16px}.section-title{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#666;margin:16px 0 8px}.net-list{background:#1c1c1c;border-radius:10px;overflow:hidden;margin-bottom:4px}.net-row{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;border-bottom:1px solid #222}.net-row:last-child{border-bottom:none}.net-row:active{background:#2a2a2a}.bars{font-size:1rem;color:#4af;min-width:32px}.net-name{flex:1;font-size:.95rem}input{width:100%;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#f0f0f0;padding:12px 14px;font-size:1rem;outline:none;margin-top:4px}input:focus{border-color:#fa0}label{font-size:.8rem;color:#888;display:block;margin-top:14px}.pw-row{position:relative}.pw-row input{padding-right:48px}.pw-toggle{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:#666;cursor:pointer;font-size:.85rem;padding:4px}button.connect{width:100%;background:#fa0;color:#000;border:none;border-radius:8px;padding:14px;font-size:1rem;font-weight:700;cursor:pointer;margin-top:20px}button.connect:active{opacity:.8}#status{margin-top:16px;padding:12px 14px;border-radius:10px;font-size:.9rem;display:none}#status.error{background:#2a0a0a;color:#f66;display:block}#status.info{background:#1a1a2a;color:#aaf;display:block}#status.success{background:#0a2a0a;color:#6f6;display:block}.vnc-link{display:block;margin-top:10px;color:#4af;font-size:.85rem}.spinner{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}</style>
 </head><body>
 <h1>WiFi Setup</h1>
-<div style="background:#1a1f2e;border:1px solid #2c3a55;border-radius:8px;padding:10px 14px;font-size:.82rem;color:#bcd;margin-bottom:14px">
-  <strong style="color:#4af">Android tip:</strong> If your phone keeps switching off this network,
-  go to Settings → Network &amp; Internet → "Switch to mobile data automatically" and turn it OFF.
-</div>
 <div class="section-title">Nearby Networks</div>
 <div class="net-list" id="net-list">${netRows || '<div style="padding:12px 14px;color:#555;font-size:.9rem">No networks found</div>'}</div>
-<button onclick="refreshScan()" style="font-size:.8rem;background:none;border:none;color:#4af;cursor:pointer;padding:6px 0;display:block">↻ Rescan networks</button>
+<button onclick="refreshScan()" style="font-size:.8rem;background:none;border:none;color:#4af;cursor:pointer;padding:6px 0;display:block">Rescan networks</button>
 <div class="section-title">Network</div>
 <input type="text" id="ssid" placeholder="Network name">
 <label>Password <span style="color:#555">(leave blank for open networks)</span></label>
@@ -410,10 +621,10 @@ function buildSetupPage(networks: { ssid: string; signal: number; secured: boole
 <script>
 function selectNetwork(ssid){document.getElementById('ssid').value=ssid;document.getElementById('password').focus()}
 function togglePw(){const i=document.getElementById('password');const b=event.target;i.type=i.type==='password'?'text':'password';b.textContent=i.type==='password'?'Show':'Hide'}
-async function refreshScan(){const l=document.getElementById('net-list');l.innerHTML='<div style="padding:12px 14px;color:#555">Scanning…</div>';const r=await fetch('/api/wifi-scan').then(r=>r.json()).catch(()=>[]);if(!r.length){l.innerHTML='<div style="padding:12px 14px;color:#555">No networks found</div>';return}l.innerHTML=r.map(n=>\`<div class="net-row" onclick="selectNetwork('\${n.ssid.replace(/'/g,"\\\\'")}')"><span class="bars">\${n.signal>=70?'▂▄▆█':n.signal>=50?'▂▄▆░':n.signal>=30?'▂▄░░':'▂░░░'}</span><span class="net-name">\${n.ssid.replace(/</g,'&lt;')}</span>\${n.secured?'<span>🔒</span>':''}</div>\`).join('')}
+async function refreshScan(){const l=document.getElementById('net-list');l.innerHTML='<div style="padding:12px 14px;color:#555">Scanning...</div>';const r=await fetch('/api/wifi-scan').then(r=>r.json()).catch(()=>[]);if(!r.length){l.innerHTML='<div style="padding:12px 14px;color:#555">No networks found</div>';return}l.innerHTML=r.map(n=>\`<div class="net-row" onclick="selectNetwork('\${n.ssid.replace(/'/g,"\\\\'")}')"><span class="bars">\${n.signal>=70?'▂▄▆█':n.signal>=50?'▂▄▆░':n.signal>=30?'▂▄░░':'▂░░░'}</span><span class="net-name">\${n.ssid.replace(/</g,'&lt;')}</span>\${n.secured?'<span class="lock">lock</span>':''}</div>\`).join('')}
 function setStatus(cls,msg){const e=document.getElementById('status');e.className=cls;e.innerHTML=msg}
-async function doConnect(){const ssid=document.getElementById('ssid').value.trim();if(!ssid){setStatus('error','Enter a network name');return}const password=document.getElementById('password').value;setStatus('info','<span class="spinner">⟳</span> Connecting to <b>'+ssid+'</b>…');document.querySelector('.connect').disabled=true;try{const r=await fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password})}).then(r=>r.json());if(r.status==='online'||r.status==='connected'){setStatus('success','✓ Connected! Display restarting…')}else if(r.status==='captive_portal'){setStatus('info','⚠ Venue requires sign-in. Use <a class="vnc-link" href="/vnc/'+r.pin+'" target="_blank">Web VNC</a> to sign in, then <button onclick="pollInternet()" style="margin-top:8px;background:#fa0;color:#000;border:none;border-radius:6px;padding:8px 16px;cursor:pointer">I signed in — continue</button>')}else{setStatus('error',r.message||'Connection failed');document.querySelector('.connect').disabled=false}}catch(e){setStatus('error','Request failed — try again');document.querySelector('.connect').disabled=false}}
-async function pollInternet(){setStatus('info','<span class="spinner">⟳</span> Checking internet…');for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,2000));const r=await fetch('/api/internet-status').then(r=>r.json()).catch(()=>({}));if(r.online||r.status==='proceeding'){setStatus('success','✓ Connected!');return}}setStatus('error','Still no internet. Try again.')}
+async function doConnect(){const ssid=document.getElementById('ssid').value.trim();if(!ssid){setStatus('error','Enter a network name');return}const password=document.getElementById('password').value;setStatus('info','<span class="spinner">o</span> Connecting to <b>'+ssid+'</b>...');document.querySelector('.connect').disabled=true;try{const r=await fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password})}).then(r=>r.json());if(r.status==='online'||r.status==='connected'){setStatus('success','Connected. Display restarting...')}else if(r.status==='captive_portal'){setStatus('info','Venue requires sign-in. Use <a class="vnc-link" href="/vnc/'+r.pin+'" target="_blank">Web VNC</a> to sign in, then <button onclick="pollInternet()" style="margin-top:8px;background:#fa0;color:#000;border:none;border-radius:6px;padding:8px 16px;cursor:pointer">I signed in -&gt; continue</button>')}else{setStatus('error',r.message||'Connection failed');document.querySelector('.connect').disabled=false}}catch(e){setStatus('error','Request failed. Try again.');document.querySelector('.connect').disabled=false}}
+async function pollInternet(){setStatus('info','<span class="spinner">o</span> Checking internet...');for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,2000));const r=await fetch('/api/internet-status').then(r=>r.json()).catch(()=>({}));if(r.online||r.status==='proceeding'){setStatus('success','Connected.');return}}setStatus('error','Still no internet. Try again.')}
 let ethMode='dhcp';
 function setEthMode(m){ethMode=m;document.getElementById('btn-dhcp').style.background=m==='dhcp'?'#333':'#252525';document.getElementById('btn-static').style.background=m==='static'?'#333':'#252525';document.getElementById('eth-static-fields').style.display=m==='static'?'block':'none'}
 async function applyEth(){const ip=document.getElementById('eth-ip').value.trim();const prefix=document.getElementById('eth-prefix').value.trim()||'24';const gw=document.getElementById('eth-gw').value.trim();if(!ip){document.getElementById('eth-status2').innerHTML='<span style="color:#f66">Enter an IP address</span>';return}const r=await fetch('/api/eth-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'static',ip,prefix,gateway:gw})}).then(r=>r.json()).catch(()=>({error:'Request failed'}));document.getElementById('eth-status2').innerHTML=r.ok?'<span style="color:#6f6">✓ '+r.message+'</span>':'<span style="color:#f66">'+r.error+'</span>'}
@@ -491,6 +702,29 @@ function buildConnectingPage() {
   <div class="spinner"></div>
   <h1>Connecting to server…</h1>
   <div class="version">v${VERSION}</div>
+</body></html>`;
+}
+
+function buildIdentifyPage() {
+  // Pulsing fullscreen flash so an operator can spot which device responded
+  // to "Identify" from the BLE picker. Auto-redirects back to / after 3s in
+  // case the daemon-side timer doesn't fire.
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Identify</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#fa0;color:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    animation:flash .6s ease-in-out infinite alternate}
+  @keyframes flash{from{background:#fa0}to{background:#fff}}
+  h1{font-size:5rem;font-weight:900;letter-spacing:.04em}
+  .ssid{font-size:2rem;font-weight:700;margin-top:24px;letter-spacing:.06em}
+  .pin{font-size:2rem;letter-spacing:.25em;color:#222;margin-top:8px}
+</style></head>
+<body>
+  <h1>THIS DEVICE</h1>
+  <div class="ssid">${AP_SSID}</div>
+  <div class="pin">PIN ${PIN}</div>
+  <script>setTimeout(()=>location.href='/',3000)</script>
 </body></html>`;
 }
 

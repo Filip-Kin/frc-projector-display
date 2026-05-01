@@ -53,6 +53,9 @@ export async function scanWifi(): Promise<WifiNetwork[]> {
         const signal = parseInt(parts.pop()!) || 0;
         const ssid = parts.join(':').replace(/\\:/g, ':').trim();
         if (!ssid || seen.has(ssid)) continue;
+        // Hide our own AP (and any other display's AP) from the picker — selecting
+        // it would just connect the device back to itself.
+        if (/^FRC-Display-/.test(ssid)) continue;
         seen.add(ssid);
         networks.push({ ssid, signal, secured: security !== '--' && security !== '' });
       }
@@ -64,11 +67,16 @@ export async function scanWifi(): Promise<WifiNetwork[]> {
 
 export function checkInternet(): Promise<InternetResult> {
   return new Promise((resolve) => {
-    exec('curl -sLI --max-time 8 http://connectivitycheck.gstatic.com/generate_204 2>/dev/null', (err, stdout) => {
-      if (err || !stdout) { resolve({ online: false, portalUrl: null }); return; }
+    exec('curl -sLI --max-time 8 -w "\\n[exitcode]" http://connectivitycheck.gstatic.com/generate_204 2>&1', (err, stdout) => {
+      if (err || !stdout) {
+        console.log(`[net-check] curl exec err=${err?.message ?? '(none)'} stdout="${(stdout ?? '').slice(0, 200)}"`);
+        resolve({ online: false, portalUrl: null }); return;
+      }
       const statuses = [...stdout.matchAll(/HTTP\/\S+\s+(\d+)/g)];
       const last = statuses.length ? parseInt(statuses[statuses.length - 1][1]) : 0;
       if (last === 204) { resolve({ online: true, portalUrl: null }); return; }
+      // Non-204: log a one-liner so we can see whether it's DNS, TCP, TLS, or a portal
+      console.log(`[net-check] not online: last_status=${last} body_head="${stdout.split('\n')[0].slice(0,120)}"`);
       const loc = stdout.match(/[Ll]ocation:\s*(\S+)/);
       resolve({ online: false, portalUrl: loc ? loc[1].trim() : null });
     });

@@ -58,6 +58,7 @@ case $PKG_MGR in
       ffmpeg curl tar python3 \
       network-manager dnsmasq iptables \
       avahi-utils \
+      bluez bluez-tools \
       pipewire pipewire-pulse wireplumber pulseaudio-utils \
       libasound2-plugins >/dev/null
     # Route all ALSA apps (including Chromium's audio service) through PipeWire
@@ -90,6 +91,9 @@ if ! id "$SERVICE_USER" &>/dev/null; then
   useradd -m -s /bin/bash -G audio,video "$SERVICE_USER"
   echo "    Created user $SERVICE_USER"
 fi
+# Bluetooth group is needed for some BlueZ HCI ops; the dbus policy below grants
+# the actual GATT/advertisement permissions the Improv BLE server requires.
+usermod -aG bluetooth "$SERVICE_USER" 2>/dev/null || true
 USER_HOME=$(getent passwd "$SERVICE_USER" | cut -d: -f6)
 
 # ── LightDM autologin ─────────────────────────────────────────────────────────
@@ -132,6 +136,26 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "$INSTALL_DIR"
 echo "[8] Configuring NetworkManager..."
 systemctl enable NetworkManager 2>/dev/null || true
 systemctl start NetworkManager 2>/dev/null || true
+
+# Tell NM to leave /etc/resolv.conf alone. The AP-mode dnsmasq otherwise
+# clobbers it with `nameserver 127.0.0.1` (or empties it on teardown), which
+# means the device itself can't resolve display.filipkin.com while in AP mode
+# or just after exiting it.
+mkdir -p /etc/NetworkManager/conf.d
+cat > /etc/NetworkManager/conf.d/no-dns.conf << 'NMDNS'
+[main]
+dns=none
+rc-manager=unmanaged
+NMDNS
+
+# Static fallback DNS so the daemon can always reach the control server
+# regardless of which network connection (or AP mode) is active.
+cat > /etc/resolv.conf << 'RESOLVCONF'
+# Static; managed by FRC Projector Display install.sh
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+RESOLVCONF
+systemctl restart NetworkManager 2>/dev/null || true
 # Disable system dnsmasq — it grabs port 53 and prevents NM's built-in dnsmasq
 # from running for the WiFi AP, leaving phones stuck on "obtaining IP address"
 systemctl disable --now dnsmasq 2>/dev/null || true
@@ -146,6 +170,31 @@ address=/#/192.168.4.1
 # without aggressive timeouts that close the popup mid-configuration.
 dhcp-option=114,"http://192.168.4.1/captive-portal-api"
 NMCONF
+
+# ── BlueZ dbus policy — let the service user register GATT apps + BLE adverts ─
+# Stock /usr/share/dbus-1/system.d/bluetooth.conf only grants root the right to
+# implement the GattCharacteristic1 / LEAdvertisement1 interfaces. Without this
+# extra policy file, dbus-next calls to RegisterApplication / RegisterAdvertisement
+# fail with org.freedesktop.DBus.Error.AccessDenied.
+echo "[8a] Installing BlueZ dbus policy for ${SERVICE_USER}..."
+cat > /etc/dbus-1/system.d/frc-display-bluetooth.conf << POLICYEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE busconfig PUBLIC
+ "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <policy user="${SERVICE_USER}">
+    <allow send_destination="org.bluez"/>
+    <allow send_interface="org.bluez.GattCharacteristic1"/>
+    <allow send_interface="org.bluez.GattDescriptor1"/>
+    <allow send_interface="org.bluez.GattService1"/>
+    <allow send_interface="org.bluez.LEAdvertisement1"/>
+    <allow send_interface="org.freedesktop.DBus.ObjectManager"/>
+    <allow send_interface="org.freedesktop.DBus.Properties"/>
+  </policy>
+</busconfig>
+POLICYEOF
+systemctl reload dbus 2>/dev/null || systemctl restart dbus 2>/dev/null || true
 
 # ── Self-signed TLS cert for AP-mode HTTPS server ─────────────────────────────
 # Android probes https://www.google.com/generate_204 in parallel with HTTP.
@@ -244,6 +293,29 @@ curl -fsSL "\${SERVER_URL}/install.sh" | SERVICE_USER="${SERVICE_USER}" INSTALL_
 SCRIPT
 chmod 755 /usr/local/bin/frc-install
 
+cat > /usr/local/bin/frc-usb-mount << 'SCRIPT'
+#!/bin/bash
+# frc-usb-mount {device} {mountpoint} — mount a USB block device read-only
+DEV="$1"; MNT="$2"
+[ -z "$DEV" ] || [ -z "$MNT" ] && { echo "Usage: frc-usb-mount <device> <mountpoint>"; exit 2; }
+[ -b "$DEV" ] || { echo "$DEV is not a block device"; exit 2; }
+case "$MNT" in /run/frc-display-usb/*) : ;; *) echo "Mount point must be under /run/frc-display-usb/"; exit 2 ;; esac
+mkdir -p "$MNT"
+mount -o ro,nosuid,nodev,noexec "$DEV" "$MNT"
+SCRIPT
+chmod 755 /usr/local/bin/frc-usb-mount
+
+cat > /usr/local/bin/frc-usb-unmount << 'SCRIPT'
+#!/bin/bash
+# frc-usb-unmount {mountpoint}
+MNT="$1"
+[ -z "$MNT" ] && { echo "Usage: frc-usb-unmount <mountpoint>"; exit 2; }
+case "$MNT" in /run/frc-display-usb/*) : ;; *) echo "Refusing to unmount outside /run/frc-display-usb/"; exit 2 ;; esac
+umount "$MNT" 2>/dev/null || umount -l "$MNT" 2>/dev/null || true
+rmdir "$MNT" 2>/dev/null || true
+SCRIPT
+chmod 755 /usr/local/bin/frc-usb-unmount
+
 cat > /usr/local/bin/frc-eth-static << 'SCRIPT'
 #!/bin/bash
 # frc-eth-static {iface} {ip} {prefix} {gateway}
@@ -270,7 +342,7 @@ chmod 755 /usr/local/bin/frc-eth-dhcp
 # ── Sudoers for WiFi + ethernet helpers ───────────────────────────────────────
 echo "[10] Configuring sudoers..."
 cat > /etc/sudoers.d/frc-display << SUDOCONF
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /bin/systemctl restart lightdm
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm
 SUDOCONF
 chmod 440 /etc/sudoers.d/frc-display
 

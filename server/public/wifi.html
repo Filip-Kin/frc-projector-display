@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>FRC Display - Wi-Fi Setup</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#111;color:#f0f0f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    min-height:100vh;padding:24px;display:flex;flex-direction:column;align-items:center;gap:24px}
+  h1{font-size:1.6rem;font-weight:700;color:#fa0;margin-top:24px}
+  .lede{color:#bbb;text-align:center;max-width:520px;line-height:1.55;font-size:1rem}
+  .panel{background:#1c1c1c;border:1px solid #2a2a2a;border-radius:12px;padding:20px 22px;
+    width:100%;max-width:520px}
+  .panel h2{font-size:1rem;font-weight:700;color:#4af;margin-bottom:8px}
+  .panel p{color:#aaa;font-size:.92rem;line-height:1.55}
+  .panel code{background:#000a;color:#cf8;padding:1px 6px;border-radius:4px;font-size:.88em}
+  .panel ul{margin-left:1.2em;color:#aaa;font-size:.92rem;line-height:1.6}
+  .panel.warn{background:#2a1810;border-color:#5a3a20}
+  .panel.warn h2{color:#fc6}
+  .browsers{display:flex;gap:8px;flex-wrap:wrap;font-size:.85rem;color:#888;margin-top:6px}
+  .browsers span{background:#252525;padding:3px 9px;border-radius:6px}
+  improv-wifi-launch-button{display:block;text-align:center;margin-top:8px}
+  /* The launch button web component uses Shadow DOM for its actual button;
+     this wrapper class styles a fallback in case the script fails to load. */
+  #fallback-button{display:inline-block;background:#fa0;color:#000;border:none;border-radius:8px;
+    padding:14px 22px;font-size:1rem;font-weight:700;cursor:pointer;text-decoration:none;margin-top:8px}
+  #unsupported{display:none}
+  #supported{display:none}
+  body.bt-yes #supported{display:flex;flex-direction:column;align-items:center;gap:14px;width:100%}
+  body.bt-no #unsupported{display:flex;flex-direction:column;align-items:center;gap:14px;width:100%;max-width:520px}
+  .footer{font-size:.78rem;color:#555;margin-top:auto;padding-top:24px}
+</style>
+</head>
+<body>
+  <h1>Connect a Display to Wi-Fi</h1>
+
+  <div id="supported">
+    <div class="lede">
+      Make sure your Bluetooth is on, then tap the button below and pick your display from the list.
+      The display's screen will say <code>FRC-Display-XXXXXX</code>; pick the one matching your screen.
+    </div>
+    <improv-wifi-launch-button>
+      <button slot="activate" id="fallback-button">Connect Device to Wi-Fi</button>
+    </improv-wifi-launch-button>
+    <div class="panel">
+      <h2>Tip: not seeing your display?</h2>
+      <ul>
+        <li>The display must be on its <strong>WiFi Setup</strong> screen (orange "WiFi Setup" header).</li>
+        <li>Tap <strong>Identify</strong> in the device list to flash a screen on the projector and confirm you picked the right one.</li>
+        <li>If the picker is empty, fully close Chrome and reopen this page.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div id="unsupported">
+    <div class="panel warn">
+      <h2>Your browser can't do this</h2>
+      <p>Bluetooth setup needs Web Bluetooth, which only works in <strong>Google Chrome on Android</strong> (or desktop Chrome / Edge). Brave, Firefox, Samsung Internet, and any iOS browser don't support it.</p>
+      <div class="browsers">
+        <span>Chrome (Android)</span>
+        <span>Chrome (Desktop)</span>
+        <span>Edge (Desktop)</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Use these alternatives instead</h2>
+      <ol style="margin-left:1.2em;color:#aaa;font-size:.92rem;line-height:1.65">
+        <li>Join the display's WiFi network (<code>FRC-Display-XXXXXX</code>) and follow the captive-portal sign-in.</li>
+        <li>Or put a <code>wifi.ini</code> file at the root of any USB stick:
+          <pre style="background:#000a;color:#cf8;padding:8px 12px;border-radius:6px;margin-top:6px;font-size:.85em">ssid=YourNetwork
+password=secret</pre>
+          and plug it into the display.
+        </li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="footer">FRC Projector Display</div>
+
+<script>
+  // Feature detection: the launch button only works if the browser exposes
+  // navigator.bluetooth. If it does, load the Improv SDK; otherwise show
+  // the fallback options and skip the dependency entirely.
+  if (navigator.bluetooth) {
+    document.body.classList.add('bt-yes');
+    const s = document.createElement('script');
+    s.type = 'module';
+    s.src = 'https://www.improv-wifi.com/sdk-js/launch-button.js';
+    s.onerror = () => {
+      document.getElementById('fallback-button').onclick = () => {
+        alert('Improv SDK failed to load. Check your internet connection and try again.');
+      };
+    };
+    document.head.appendChild(s);
+  } else {
+    document.body.classList.add('bt-no');
+  }
+</script>
+</body>
+</html>
