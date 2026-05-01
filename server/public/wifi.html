@@ -86,7 +86,7 @@ password=secret</pre>
     document.body.classList.add('bt-yes');
     const s = document.createElement('script');
     s.type = 'module';
-    s.src = 'https://www.improv-wifi.com/sdk-js/launch-button.js';
+    s.src = 'https://www.improv-wifi.com/sdk-ble-js/launch-button.js';
     s.onerror = () => {
       document.getElementById('fallback-button').onclick = () => {
         alert('Improv SDK failed to load. Check your internet connection and try again.');
