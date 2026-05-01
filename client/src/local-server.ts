@@ -154,11 +154,14 @@ app.get('/youtube', async (req, res) => {
   const apiBase = (process.env.SERVER_URL ?? 'https://display.filipkin.com').replace(/\/$/, '');
 
   function buildSrc(spec: { kind: 'video' | 'channel'; id: string }) {
-    // No &start=99999: YouTube live embeds default to live edge anyway, and
-    // VOD content (today's webcast = a recorded video) errors 153 if seeked
-    // out of bounds. Plain autoplay+mute is enough.
-    if (spec.kind === 'channel') return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.id)}&autoplay=1&mute=1`;
-    return `https://www.youtube.com/embed/${encodeURIComponent(spec.id)}?autoplay=1&mute=1&rel=0`;
+    // mute=1 + enablejsapi=1: load muted so autoplay always works, then a
+    // small JS block below uses the IFrame API to unmute once the player
+    // says it's ready. ~1s of silence at start, then audio.
+    // No start=99999: that's an out-of-bounds seek for VOD content, which
+    // YouTube rejects with player error 153.
+    const common = 'autoplay=1&mute=1&enablejsapi=1';
+    if (spec.kind === 'channel') return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.id)}&${common}`;
+    return `https://www.youtube.com/embed/${encodeURIComponent(spec.id)}?${common}&rel=0`;
   }
 
   let src = '';
@@ -185,14 +188,29 @@ app.get('/youtube', async (req, res) => {
   // The page reloads itself hourly so an event:KEY-resolved page picks up a
   // new day's webcast without intervention. Cheap (one HTTP request to the
   // local daemon) and reliable (full page nav, not iframe.src swap).
-  const reloadJs = ev ? `<script>setTimeout(() => location.reload(), 60 * 60 * 1000);</script>` : '';
+  const reloadJs = ev ? `setTimeout(() => location.reload(), 60 * 60 * 1000);` : '';
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;background:#000;overflow:hidden}
 iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}
 </style></head><body>
-<iframe src="${src}" allow="autoplay;fullscreen" allowfullscreen></iframe>
+<iframe id="yt" src="${src}" allow="autoplay;fullscreen" allowfullscreen></iframe>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script>
+function onYouTubeIframeAPIReady() {
+  const player = new YT.Player('yt', {
+    events: {
+      onReady: (e) => {
+        // Unmute once the player has had a moment to start. The mute=1 in
+        // the URL is what lets autoplay succeed; we flip it off as soon as
+        // the player is ready so the operator gets audio.
+        setTimeout(() => { try { e.target.unMute(); e.target.setVolume(100); } catch {} }, 1200);
+      }
+    }
+  });
+}
 ${reloadJs}
+</script>
 </body></html>`);
 });
 

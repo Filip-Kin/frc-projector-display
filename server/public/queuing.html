@@ -225,24 +225,52 @@ const streamEl = document.getElementById('stream');
 let currentEmbedSrc = '';
 
 function buildYoutubeEmbed(spec) {
-  // No start=99999: it's an out-of-bounds seek for VOD content (today's
-  // webcast can be a recorded archive, not just a livestream), which the
-  // player rejects with error 153. Live streams default to live edge anyway.
+  // mute=1 + enablejsapi=1 + an unmute via the IFrame API once the player
+  // is ready. mute=1 lets autoplay succeed; we flip mute off ~1.2s after
+  // onReady fires. No start=99999 — out-of-bounds seek error 153 on VOD.
+  const common = 'autoplay=1&mute=1&enablejsapi=1';
   if (spec.startsWith('channel:')) {
-    return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.slice(8))}&autoplay=1&mute=1`;
+    return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.slice(8))}&${common}`;
   }
-  return `https://www.youtube.com/embed/${encodeURIComponent(spec)}?autoplay=1&rel=0&mute=1`;
+  return `https://www.youtube.com/embed/${encodeURIComponent(spec)}?${common}&rel=0`;
 }
 
+let ytPlayer = null;
 function setStreamEmbed(src) {
   if (src === currentEmbedSrc) return;
   currentEmbedSrc = src;
   streamEl.innerHTML = '';
+  // Try to give the iframe an id even though we'll re-bind YT.Player; the
+  // first call kicks off the API loader if it hasn't been already.
   const yt = document.createElement('iframe');
+  yt.id = 'yt-' + Date.now();
   yt.src = src;
   yt.allow = 'autoplay;fullscreen';
   yt.allowFullscreen = true;
   streamEl.appendChild(yt);
+  // YT API loader is idempotent; once the script tag is in DOM, callbacks
+  // will fire as new players are constructed.
+  if (!document.getElementById('yt-api-script')) {
+    const s = document.createElement('script');
+    s.id = 'yt-api-script';
+    s.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  }
+  // Defer player wiring until the API is loaded. onYouTubeIframeAPIReady
+  // gets called once globally; subsequent embeds bind directly.
+  const bind = () => {
+    try {
+      ytPlayer = new YT.Player(yt.id, {
+        events: {
+          onReady: (e) => {
+            setTimeout(() => { try { e.target.unMute(); e.target.setVolume(100); } catch {} }, 1200);
+          }
+        }
+      });
+    } catch {}
+  };
+  if (window.YT && window.YT.Player) bind();
+  else window.onYouTubeIframeAPIReady = bind;
 }
 
 async function resolveEventWebcast(eventKey) {
