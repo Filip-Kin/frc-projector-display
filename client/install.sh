@@ -148,14 +148,30 @@ cat > /usr/local/bin/frc-ap-start << 'SCRIPT'
 #!/bin/bash
 # frc-ap-start {pin} {iface} — create open WiFi AP for provisioning
 PIN="$1"; IFACE="$2"
+SSID="FRC-Display-${PIN}"
+
+# Clean any leftover AP profile
 nmcli con delete "frc-provision" 2>/dev/null || true
+
+# Make sure interface isn't connected to something else (e.g. saved wifi)
+nmcli device disconnect "$IFACE" 2>/dev/null || true
+sleep 0.3
+
+# Create AP with autoconnect=no — prevents 'add' from auto-activating before
+# our explicit 'up' below (the auto-then-up race breaks Realtek cards)
 nmcli con add type wifi ifname "$IFACE" con-name "frc-provision" \
-  ssid "FRC-Display-${PIN}" \
+  autoconnect no \
+  ssid "$SSID" \
   802-11-wireless.mode ap \
+  802-11-wireless.band bg \
+  802-11-wireless.powersave disable \
   ipv4.method shared \
   ipv4.addresses "192.168.4.1/24"
+
+# Now explicitly bring it up — single activation, no race
 nmcli con up "frc-provision"
-# Redirect port 80 → 3000 for captive portal
+
+# Captive portal: redirect port 80 to our daemon
 iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 -j REDIRECT --to-port 3000 2>/dev/null || true
 SCRIPT
 chmod 755 /usr/local/bin/frc-ap-start
