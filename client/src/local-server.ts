@@ -54,6 +54,26 @@ app.get('/youtube', (req, res) => {
 app.get('/connecting', (_req, res) => res.send(buildConnectingPage()));
 app.get('/no-connection', (_req, res) => res.send(buildNoConnectionPage()));
 
+// Live debug state — reachable from any device on the network for diagnosis
+app.get('/api/debug', async (_req, res) => {
+  const { exec: execAsync } = await import('child_process');
+  const route = await new Promise<string>(r => execAsync('ip route show default', (_e, out) => r(out.trim())));
+  const links = await new Promise<string>(r => execAsync('ip -br link', (_e, out) => r(out.trim())));
+  res.json({
+    version: VERSION,
+    pin: PIN,
+    apMode: state.apMode,
+    apIface: state.apIface,
+    currentMode: state.currentMode,
+    wsState: state.serverWs?.readyState,    // 0=connecting 1=open 2=closing 3=closed
+    wsEverConnected: state.wsEverConnected,
+    ndiProcessAlive: state.ndiProcess !== null,
+    defaultRoute: route || '(none)',
+    links,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 app.get('/api/wifi-scan', async (_req, res) => res.json(await scanWifi().catch(() => [])));
 
 app.get('/api/eth-status', async (_req, res) => {
@@ -166,16 +186,20 @@ export async function runPostConnect() {
 }
 
 export async function enterApMode() {
+  console.log('[ap] === enterApMode called ===');
+  console.log(`[ap] currentMode=${state.currentMode} ndi=${!!state.ndiProcess} apMode=${state.apMode}`);
+
   // Stop any active media — ndi-play covers Chromium fullscreen so clear it first
   await stopNdi();
   stopVnc();
+  console.log('[ap] media stopped');
 
   const { getWifiInterface } = await import('./wifi.js');
   const iface = await getWifiInterface();
+  console.log(`[ap] wifi interface: ${iface ?? '(none)'}`);
 
   if (!iface) {
-    // No WiFi adapter — can't create a hotspot, but still show the offline screen
-    console.log('[ap] no WiFi adapter — showing no-connection screen');
+    console.log('[ap] NO WIFI ADAPTER — showing no-connection screen');
     await cdpNavigate(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
     return;
   }
@@ -185,11 +209,11 @@ export async function enterApMode() {
     await startAp(PIN, iface);
     state.apMode = true;
     state.apIface = iface;
-    console.log('[ap] hotspot active');
+    console.log('[ap] hotspot ACTIVE — navigating to AP page');
     await cdpNavigate(`http://localhost:${LOCAL_PORT}/`);
+    console.log('[ap] navigation complete');
   } catch (err: any) {
-    console.error('[ap] failed:', err.message);
-    // AP failed — at least show the offline screen
+    console.error(`[ap] FAILED to start: ${err.message}`);
     await cdpNavigate(`http://localhost:${LOCAL_PORT}/no-connection`).catch(() => {});
   }
 }

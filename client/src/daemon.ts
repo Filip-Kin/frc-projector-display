@@ -7,6 +7,7 @@ import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
 import { localServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
 import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
+import { startNetworkMonitor } from './network-monitor.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const VERSION      = (await import('../package.json')).version;
@@ -252,39 +253,46 @@ localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
 });
 
 connectToServer();
-runNetworkStartup();  // starts after 15s, may enter AP mode if no route
+runNetworkStartup();  // boot-time: 15s grace, then maybe AP
 
-// Belt-and-suspenders: poll kernel default route every 2s.
-// When ethernet is unplugged, the route disappears instantly — this is
-// the ground truth, faster and more reliable than WS ping/pong.
-import { exec } from 'child_process';
+// ── Real-time route monitoring ────────────────────────────────────────────────
+// Kernel netlink notifies us instantly when the default route changes.
+// Combined with a 2s safety poll. This is the ground truth — no protocol guessing.
 let routeMissingSince: number | null = null;
-setInterval(() => {
-  exec('ip route show default', (err, stdout) => {
-    const hasRoute = !err && stdout.trim().length > 0;
-    if (hasRoute) {
-      routeMissingSince = null;
-      return;
-    }
-    if (state.apMode) return; // already in AP — nothing to do
-    // NDI streaming directly to local source — don't disrupt
-    const ndiActive = state.currentMode === 'ndi' && state.ndiProcess !== null;
-    if (ndiActive) return;
+let routeOfflineTimer: ReturnType<typeof setTimeout> | null = null;
 
-    if (routeMissingSince === null) {
-      routeMissingSince = Date.now();
-      log('warn', '[net] default route gone — starting offline countdown');
-      // Show connecting screen immediately
-      cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
-      return;
-    }
-    // Route gone for ≥4s → enter AP mode
-    if (Date.now() - routeMissingSince >= 4000) {
-      log('warn', '[net] default route absent 4s+ — entering AP mode');
+startNetworkMonitor((hasRoute, reason) => {
+  log('info', `[net] route change → ${hasRoute ? 'UP' : 'DOWN'} (${reason})`);
+
+  if (hasRoute) {
+    routeMissingSince = null;
+    if (routeOfflineTimer) { clearTimeout(routeOfflineTimer); routeOfflineTimer = null; }
+    return;
+  }
+
+  // Route gone
+  if (state.apMode) {
+    log('info', '[net] route down but already in AP mode — ignoring');
+    return;
+  }
+  const ndiActive = state.currentMode === 'ndi' && state.ndiProcess !== null;
+  if (ndiActive) {
+    log('info', '[net] route down but NDI streaming — keeping current mode');
+    return;
+  }
+
+  if (routeMissingSince === null) {
+    routeMissingSince = Date.now();
+    log('warn', '[net] route DOWN — showing connecting screen, AP in 4s');
+    cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(err =>
+      log('error', `[net] connecting nav failed: ${err.message}`));
+
+    routeOfflineTimer = setTimeout(() => {
+      routeOfflineTimer = null;
       routeMissingSince = null;
-      // Force WS close so reconnect loop knows
+      log('warn', '[net] route still DOWN after 4s — entering AP mode');
       try { state.serverWs?.terminate(); } catch {}
-      enterApMode().catch(() => {});
-    }
-  });
-}, 2000);
+      enterApMode().catch(err => log('error', `[net] enterApMode failed: ${err.message}`));
+    }, 4000);
+  }
+});
