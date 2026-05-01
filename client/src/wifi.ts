@@ -36,7 +36,11 @@ export function connectWifi(ssid: string, password: string): Promise<void> {
   });
 }
 
-export function scanWifi(): Promise<WifiNetwork[]> {
+export async function scanWifi(): Promise<WifiNetwork[]> {
+  // Force a fresh rescan and wait for it to complete — rtl8723be otherwise
+  // returns stale or partial cache especially right after AP mode switches.
+  await new Promise<void>(r => exec('nmcli device wifi rescan 2>/dev/null', () => r()));
+  await new Promise(r => setTimeout(r, 2500));
   return new Promise((resolve) => {
     exec('nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list 2>/dev/null', (err, stdout) => {
       if (err || !stdout.trim()) { resolve([]); return; }

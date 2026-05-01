@@ -1,5 +1,7 @@
 import express from 'express';
 import { createServer } from 'http';
+import { createServer as createHttpsServer } from 'https';
+import { readFileSync, existsSync } from 'fs';
 import QRCode from 'qrcode';
 import path from 'path';
 import { exec } from 'child_process';
@@ -26,25 +28,71 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Captive portal: when in AP mode, redirect any non-local request to /setup.
-// This makes the OS show the "Sign in to network" notification on phones.
+// Ring buffer of recent HTTP requests for debugging captive portal behavior
+interface ReqLog { ts: number; ip: string; method: string; host: string; path: string; ua: string; status: number; }
+const reqLog: ReqLog[] = [];
+const REQ_LOG_MAX = 200;
+
+app.use((req, res, next) => {
+  // Skip the debug-log polling itself — would drown out the actual events
+  if (req.url === '/api/debug-log' || req.url === '/debug-log') return next();
+  const entry: ReqLog = {
+    ts: Date.now(),
+    ip: (req.ip ?? req.socket.remoteAddress ?? '?').replace('::ffff:', ''),
+    method: req.method,
+    host: (req.get('host') ?? '').split(':')[0],
+    path: req.url,
+    ua: (req.get('user-agent') ?? '').slice(0, 80),
+    status: 0,
+  };
+  reqLog.push(entry);
+  if (reqLog.length > REQ_LOG_MAX) reqLog.shift();
+  res.on('finish', () => { entry.status = res.statusCode; });
+  next();
+});
+
+// AP-mode captive portal: redirect any non-local request to our setup page.
+// This triggers the "Sign in to network" notification on phones.
+//
+// Note: Android may push the user off the network if mobile data
+// auto-switching is enabled. Disable that in phone Settings →
+// Network & Internet → "Switch to mobile data automatically".
 app.use((req, res, next) => {
   if (!state.apMode) return next();
   const host = (req.get('host') ?? '').split(':')[0];
   if (host === AP_IP || host === 'localhost' || host === '127.0.0.1') {
     return next();
   }
-  return res.redirect(`http://${AP_IP}:${LOCAL_PORT}/setup`);
+  res.setHeader('Cache-Control', 'no-store');
+  return res.redirect(302, `http://${AP_IP}/`);
 });
 
-app.get('/', async (_req, res) => {
+// RFC 8910 captive portal API — Android 11+ and iOS 14+ use this to manage
+// the captive portal session properly without aggressive timeouts.
+app.get('/captive-portal-api', (_req, res) => {
+  res.setHeader('Cache-Control', 'private');
+  res.json({
+    captive: state.apMode,
+    'user-portal-url': `http://${AP_IP}/`,
+    'venue-info-url': `http://${AP_IP}/`,
+    'can-extend-session': true,
+  });
+});
+
+app.get('/', async (req, res) => {
   if (state.apMode) {
-    const qr = await QRCode.toDataURL(`WIFI:T:nopass;S:${AP_SSID};;`, { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
-    res.send(buildApPage(qr));
-  } else {
-    const qr = await QRCode.toDataURL(CONTROL_URL, { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
-    res.send(buildQrPage(qr));
+    // Phone connecting via AP → serve the setup form directly at /
+    // (clean URL the captive portal browser was redirected to)
+    const host = (req.get('host') ?? '').split(':')[0];
+    if (host === AP_IP) {
+      return res.send(buildSetupPage(cachedNetworks));
+    }
+    // Local Chromium kiosk on projector → show the two-step setup screen
+    return res.send(await buildApPageAsync());
   }
+  // Not in AP mode — projector home QR
+  const qr = await QRCode.toDataURL(CONTROL_URL, { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
+  res.send(buildQrPage(qr));
 });
 
 app.get('/youtube', (req, res) => {
@@ -54,6 +102,11 @@ app.get('/youtube', (req, res) => {
 
 app.get('/connecting', (_req, res) => res.send(buildConnectingPage()));
 app.get('/no-connection', (_req, res) => res.send(buildNoConnectionPage()));
+
+// Phone-friendly request log viewer — open http://192.168.4.1:3000/debug-log
+// to see every request hitting the daemon in real time
+app.get('/debug-log', (_req, res) => res.send(buildDebugLogPage()));
+app.get('/api/debug-log', (_req, res) => res.json(reqLog.slice(-100).reverse()));
 
 // Live debug state — reachable from any device on the network for diagnosis
 app.get('/api/debug', async (_req, res) => {
@@ -83,11 +136,23 @@ app.get('/api/debug', async (_req, res) => {
 let cachedNetworks: { ssid: string; signal: number; secured: boolean }[] = [];
 export function setCachedNetworks(networks: typeof cachedNetworks) { cachedNetworks = networks; }
 
+// Manual rescan endpoint — triggers a fresh scan even while AP is up.
+// Brief radio off-channel hop may disconnect clients momentarily, but with
+// Android auto-switch disabled the phone will stay associated.
 app.get('/api/wifi-scan', async (_req, res) => {
-  // Always serve cached results — never live scan while AP is up
-  if (state.apMode) return res.json(cachedNetworks);
-  res.json(await scanWifi().catch(() => []));
+  cachedNetworks = await scanWifi().catch(() => cachedNetworks);
+  res.json(cachedNetworks);
 });
+
+// Background rescan every 30s while in AP mode so the dropdown stays fresh
+// (e.g. user moved location, networks just powered on)
+setInterval(async () => {
+  if (!state.apMode) return;
+  try {
+    const fresh = await scanWifi();
+    if (fresh.length > 0) cachedNetworks = fresh;
+  } catch {}
+}, 30000);
 
 app.get('/api/eth-status', async (_req, res) => {
   const iface = await getEthernetInterface();
@@ -246,6 +311,16 @@ export async function enterApMode() {
 
 export const localServer = createServer(app);
 
+// HTTPS listener on port 4443 (iptables NATs 443→4443 in AP mode).
+// Even with a self-signed cert that Android rejects at TLS handshake,
+// this gives Android a "TLS handshake started" signal instead of
+// "TCP connection refused", which some versions distinguish.
+const CERT_PATH = '/etc/frc-display/cert.pem';
+const KEY_PATH  = '/etc/frc-display/key.pem';
+export const httpsServer = (existsSync(CERT_PATH) && existsSync(KEY_PATH))
+  ? createHttpsServer({ cert: readFileSync(CERT_PATH), key: readFileSync(KEY_PATH) }, app)
+  : null;
+
 // ── HTML builders ─────────────────────────────────────────────────────────────
 
 function buildQrPage(qrDataUrl: string) {
@@ -260,15 +335,36 @@ function buildQrPage(qrDataUrl: string) {
 </body></html>`;
 }
 
-function buildApPage(qrDataUrl: string) {
+async function buildApPageAsync() {
+  const wifiQr = await QRCode.toDataURL(`WIFI:T:nopass;S:${AP_SSID};;`,
+    { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WiFi Setup</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:24px}h1{font-size:2rem;font-weight:700;color:#fa0}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #fa04}.qr-box img{display:block;width:260px;height:260px}.ssid{font-size:1.6rem;font-weight:700;letter-spacing:.06em;color:#fa0}.hint{font-size:.9rem;color:#888;text-align:center}.url{font-size:.8rem;color:#444;margin-top:4px}.version{font-size:1rem;color:#777;position:fixed;bottom:12px;right:16px}</style>
-</head><body>
-<h1>WiFi Setup</h1>
-<div class="qr-box"><img src="${qrDataUrl}" alt="WiFi QR"></div>
-<div class="ssid">${AP_SSID}</div>
-<div><div class="hint">Scan to connect, then configure WiFi</div><div class="url">Or open http://${AP_IP}:${LOCAL_PORT}/setup</div></div>
-<div class="version">v${VERSION}</div>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#111;color:#f0f0f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:32px 24px;gap:20px}
+  h1{font-size:2.2rem;font-weight:800;color:#fa0;letter-spacing:.02em}
+  .qr{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #fa04}
+  .qr img{display:block;width:280px;height:280px}
+  .ssid{font-size:1.6rem;font-weight:700;letter-spacing:.06em;color:#fa0}
+  .hint{font-size:1rem;color:#bbb;text-align:center;max-width:560px;line-height:1.55}
+  .tips{background:#1a1f2e;border:1px solid #2c3a55;border-radius:10px;padding:12px 18px;
+    font-size:.85rem;color:#9ab;text-align:center;max-width:560px;line-height:1.6;margin-top:8px}
+  .tips strong{color:#4af}
+  .version{font-size:.85rem;color:#666;position:fixed;bottom:14px;right:18px}
+</style></head>
+<body>
+  <h1>WiFi Setup</h1>
+  <div class="qr"><img src="${wifiQr}" alt="WiFi QR"></div>
+  <div class="ssid">${AP_SSID}</div>
+  <div class="hint">Scan to join the network. A "Sign in to network" notification will appear — tap it to open the setup page.</div>
+  <div class="tips">
+    <strong>Trouble staying connected?</strong><br>
+    On Android: Settings → Network &amp; Internet → "Switch to mobile data automatically" → OFF.<br>
+    Also forget any other saved WiFi networks that might be in range.
+  </div>
+  <div class="version">v${VERSION}</div>
 </body></html>`;
 }
 
@@ -284,9 +380,13 @@ function buildSetupPage(networks: { ssid: string; signal: number; secured: boole
 <style>*{box-sizing:border-box;margin:0;padding:0}body{background:#111;color:#f0f0f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:16px;min-height:100vh}h1{font-size:1.3rem;font-weight:700;color:#fa0;margin-bottom:16px}.section-title{font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:#666;margin:16px 0 8px}.net-list{background:#1c1c1c;border-radius:10px;overflow:hidden;margin-bottom:4px}.net-row{display:flex;align-items:center;gap:10px;padding:12px 14px;cursor:pointer;border-bottom:1px solid #222}.net-row:last-child{border-bottom:none}.net-row:active{background:#2a2a2a}.bars{font-size:1rem;color:#4af;min-width:32px}.net-name{flex:1;font-size:.95rem}input{width:100%;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#f0f0f0;padding:12px 14px;font-size:1rem;outline:none;margin-top:4px}input:focus{border-color:#fa0}label{font-size:.8rem;color:#888;display:block;margin-top:14px}.pw-row{position:relative}.pw-row input{padding-right:48px}.pw-toggle{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:#666;cursor:pointer;font-size:.85rem;padding:4px}button.connect{width:100%;background:#fa0;color:#000;border:none;border-radius:8px;padding:14px;font-size:1rem;font-weight:700;cursor:pointer;margin-top:20px}button.connect:active{opacity:.8}#status{margin-top:16px;padding:12px 14px;border-radius:10px;font-size:.9rem;display:none}#status.error{background:#2a0a0a;color:#f66;display:block}#status.info{background:#1a1a2a;color:#aaf;display:block}#status.success{background:#0a2a0a;color:#6f6;display:block}.vnc-link{display:block;margin-top:10px;color:#4af;font-size:.85rem}.spinner{display:inline-block;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}</style>
 </head><body>
 <h1>WiFi Setup</h1>
+<div style="background:#1a1f2e;border:1px solid #2c3a55;border-radius:8px;padding:10px 14px;font-size:.82rem;color:#bcd;margin-bottom:14px">
+  <strong style="color:#4af">Android tip:</strong> If your phone keeps switching off this network,
+  go to Settings → Network &amp; Internet → "Switch to mobile data automatically" and turn it OFF.
+</div>
 <div class="section-title">Nearby Networks</div>
 <div class="net-list" id="net-list">${netRows || '<div style="padding:12px 14px;color:#555;font-size:.9rem">No networks found</div>'}</div>
-<div style="font-size:.75rem;color:#555;padding:4px 0">List captured before hotspot started — type SSID manually for a hidden network.</div>
+<button onclick="refreshScan()" style="font-size:.8rem;background:none;border:none;color:#4af;cursor:pointer;padding:6px 0;display:block">↻ Rescan networks</button>
 <div class="section-title">Network</div>
 <input type="text" id="ssid" placeholder="Network name">
 <label>Password <span style="color:#555">(leave blank for open networks)</span></label>
@@ -319,6 +419,58 @@ function setEthMode(m){ethMode=m;document.getElementById('btn-dhcp').style.backg
 async function applyEth(){const ip=document.getElementById('eth-ip').value.trim();const prefix=document.getElementById('eth-prefix').value.trim()||'24';const gw=document.getElementById('eth-gw').value.trim();if(!ip){document.getElementById('eth-status2').innerHTML='<span style="color:#f66">Enter an IP address</span>';return}const r=await fetch('/api/eth-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'static',ip,prefix,gateway:gw})}).then(r=>r.json()).catch(()=>({error:'Request failed'}));document.getElementById('eth-status2').innerHTML=r.ok?'<span style="color:#6f6">✓ '+r.message+'</span>':'<span style="color:#f66">'+r.error+'</span>'}
 async function loadEthStatus(){const s=await fetch('/api/eth-status').then(r=>r.json()).catch(()=>({}));if(!s.iface){document.getElementById('eth-status').textContent='No ethernet adapter detected';return}const ip=s.ip||'No IP';const note=s.isLinkLocal?' (DHCP failed — link-local)':s.hasRoutableIp?' (connected)':' (no IP)';document.getElementById('eth-status').textContent=s.iface+': '+ip+note;if(s.ip)document.getElementById('eth-ip').value=s.ip}
 loadEthStatus();setEthMode('dhcp');
+</script>
+</body></html>`;
+}
+
+function buildDebugLogPage() {
+  return `<!DOCTYPE html><html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Request Log</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a0a0a;color:#ddd;font-family:ui-monospace,Menlo,Monaco,monospace;
+    font-size:11px;padding:8px;line-height:1.4}
+  h1{font-size:13px;color:#4af;margin-bottom:4px}
+  .meta{font-size:10px;color:#555;margin-bottom:10px}
+  .row{padding:4px 6px;border-bottom:1px solid #1a1a1a;display:grid;
+    grid-template-columns:auto auto auto 1fr;gap:6px;align-items:start}
+  .ts{color:#666;white-space:nowrap}
+  .status-2xx,.status-3xx{color:#4af}
+  .status-4xx,.status-5xx{color:#f66}
+  .method{color:#fa0;min-width:34px}
+  .path{color:#dfd;word-break:break-all}
+  .ua{color:#555;font-size:10px;margin-left:46px;margin-top:2px;word-break:break-all}
+</style></head>
+<body>
+<h1>Request Log</h1>
+<div class="meta" id="meta">Auto-refresh 1s · scroll up for newest</div>
+<div id="log">Loading…</div>
+<script>
+function fmt(ts){
+  const d=new Date(ts);const s=d.toLocaleTimeString([],{hour12:false})+'.'+String(d.getMilliseconds()).padStart(3,'0');
+  return s;
+}
+function statusClass(s){if(!s)return '';return 'status-'+Math.floor(s/100)+'xx';}
+async function refresh(){
+  try{
+    const log=await fetch('/api/debug-log').then(r=>r.json());
+    const html=log.map(r=>{
+      const path=r.path.length>60?r.path.slice(0,60)+'…':r.path;
+      return '<div class="row">'
+        +'<span class="ts">'+fmt(r.ts)+'</span>'
+        +'<span class="'+statusClass(r.status)+'">'+(r.status||'?')+'</span>'
+        +'<span class="method">'+r.method+'</span>'
+        +'<span class="path">'+r.host+r.path.replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</span>'
+        +(r.ua?'<span class="ua" style="grid-column:1/-1">'+r.ip+' · '+r.ua.replace(/</g,'&lt;')+'</span>':'')
+        +'</div>';
+    }).join('');
+    document.getElementById('log').innerHTML=html||'<div style="color:#555">No requests yet</div>';
+    document.getElementById('meta').textContent='Auto-refresh 1s · '+log.length+' entries · '+new Date().toLocaleTimeString();
+  }catch(e){document.getElementById('meta').textContent='Error: '+e.message;}
+}
+refresh();
+setInterval(refresh,1000);
 </script>
 </body></html>`;
 }

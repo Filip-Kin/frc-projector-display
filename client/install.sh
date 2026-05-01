@@ -65,6 +65,7 @@ case $PKG_MGR in
 pcm.default pulse
 ctl.default pulse
 ASOUNDEOF
+    apt-get install -y openssl >/dev/null
     ;;
   dnf)
     dnf install -y \
@@ -139,7 +140,34 @@ cat > /etc/NetworkManager/dnsmasq-shared.d/captive.conf << 'NMCONF'
 # Redirect all DNS to the AP IP when in shared (hotspot) mode — triggers
 # iOS/Android captive portal detection popup automatically.
 address=/#/192.168.4.1
+
+# RFC 8910 — Captive Portal API URL via DHCP option 114.
+# Modern Android (11+) and iOS (14+) use this to manage the portal session
+# without aggressive timeouts that close the popup mid-configuration.
+dhcp-option=114,"http://192.168.4.1/captive-portal-api"
 NMCONF
+
+# ── Self-signed TLS cert for AP-mode HTTPS server ─────────────────────────────
+# Android probes https://www.google.com/generate_204 in parallel with HTTP.
+# Without a TLS listener on :443, the probe gets TCP RST/timeout and Android
+# decides "limited connectivity" → auto-disconnects. Self-signed cert won't
+# pass Android's chain validation either, but presenting *any* cert at the
+# TLS handshake gives Android a slightly different signal that some versions
+# tolerate longer.
+echo "[8b] Generating self-signed TLS cert..."
+mkdir -p /etc/frc-display
+if [ ! -f /etc/frc-display/cert.pem ]; then
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout /etc/frc-display/key.pem \
+    -out    /etc/frc-display/cert.pem \
+    -days 3650 \
+    -subj "/CN=frc-display" \
+    -addext "subjectAltName=IP:192.168.4.1,DNS:connectivitycheck.gstatic.com,DNS:www.google.com,DNS:play.googleapis.com,DNS:clients3.google.com,DNS:captive.apple.com" \
+    >/dev/null 2>&1
+fi
+chown -R "${SERVICE_USER}:${SERVICE_USER}" /etc/frc-display
+chmod 600 /etc/frc-display/key.pem
+chmod 644 /etc/frc-display/cert.pem
 
 # ── Root helper scripts ────────────────────────────────────────────────────────
 echo "[9] Installing WiFi helper scripts..."
@@ -171,8 +199,9 @@ nmcli con add type wifi ifname "$IFACE" con-name "frc-provision" \
 # Now explicitly bring it up — single activation, no race
 nmcli con up "frc-provision"
 
-# Captive portal: redirect port 80 to our daemon
-iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80 -j REDIRECT --to-port 3000 2>/dev/null || true
+# Captive portal: redirect ports 80→3000 (HTTP) and 443→4443 (HTTPS)
+iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 80  -j REDIRECT --to-port 3000 2>/dev/null || true
+iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport 443 -j REDIRECT --to-port 4443 2>/dev/null || true
 SCRIPT
 chmod 755 /usr/local/bin/frc-ap-start
 
@@ -180,7 +209,8 @@ cat > /usr/local/bin/frc-ap-stop << 'SCRIPT'
 #!/bin/bash
 # frc-ap-stop {iface} — tear down WiFi AP
 IFACE="$1"
-iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 -j REDIRECT --to-port 3000 2>/dev/null || true
+iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80  -j REDIRECT --to-port 3000 2>/dev/null || true
+iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 443 -j REDIRECT --to-port 4443 2>/dev/null || true
 nmcli con down "frc-provision" 2>/dev/null || true
 nmcli con delete "frc-provision" 2>/dev/null || true
 SCRIPT
@@ -188,14 +218,21 @@ chmod 755 /usr/local/bin/frc-ap-stop
 
 cat > /usr/local/bin/frc-wifi-connect << 'SCRIPT'
 #!/bin/bash
-# frc-wifi-connect {ssid} {password} — connect to WiFi (empty password = open network)
+# frc-wifi-connect {ssid} {password}
+# Creates a connection profile directly — doesn't require the SSID to be in
+# NM's scan cache (rtl8723be misses networks on first scan post-AP-mode).
 SSID="$1"; PASS="$2"
+IFACE=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2=="wifi" {print $1; exit}')
+[ -z "$IFACE" ] && { echo "No wifi interface"; exit 1; }
 nmcli device wifi rescan 2>/dev/null || true
+nmcli con delete "$SSID" 2>/dev/null || true
 if [ -z "$PASS" ]; then
-  nmcli device wifi connect "$SSID"
+  nmcli con add type wifi ifname "$IFACE" con-name "$SSID" ssid "$SSID"
 else
-  nmcli device wifi connect "$SSID" password "$PASS"
+  nmcli con add type wifi ifname "$IFACE" con-name "$SSID" ssid "$SSID" \
+    wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PASS"
 fi
+nmcli con up "$SSID"
 SCRIPT
 chmod 755 /usr/local/bin/frc-wifi-connect
 

@@ -5,7 +5,7 @@ import { cdpNavigate } from './cdp.js';
 import { setHome, setChromium, setNdi, setVnc, startX11vncDaemon, setPin } from './modes.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
-import { localServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
+import { localServer, httpsServer, LOCAL_PORT, enterApMode, initServer } from './local-server.js';
 import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
 import { startNetworkMonitor } from './network-monitor.js';
 
@@ -245,12 +245,21 @@ async function runNetworkStartup() {
 startX11vncDaemon();
 
 localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
-  log('info', `[daemon] local server on port ${LOCAL_PORT}`);
+  log('info', `[daemon] local HTTP server on port ${LOCAL_PORT}`);
   // Show connecting screen if WS hasn't already connected within 3s
   setTimeout(() => {
     if (!state.wsEverConnected) cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`);
   }, 3000);
 });
+
+// HTTPS listener for AP-mode probes (iptables NATs port 443 → 4443).
+// If cert isn't installed, httpsServer is null — log and continue.
+if (httpsServer) {
+  httpsServer.listen(4443, '0.0.0.0', () => log('info', '[daemon] local HTTPS server on port 4443'));
+  httpsServer.on('error', (err: Error) => log('error', `[daemon] HTTPS server: ${err.message}`));
+} else {
+  log('warn', '[daemon] no TLS cert at /etc/frc-display/cert.pem — HTTPS probes will fail');
+}
 
 connectToServer();
 runNetworkStartup();  // boot-time: 15s grace, then maybe AP
