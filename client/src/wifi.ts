@@ -10,6 +10,37 @@ export function getWifiInterface(): Promise<string | null> {
   });
 }
 
+// If a saved wifi profile (other than the AP-mode frc-provision) exists and
+// isn't currently active, bring it up. Needed because NM's autoconnect can
+// silently give up after a few failures and won't retry until something
+// resets the device, leaving the box with no wifi fallback if ethernet
+// drops. We poke it explicitly on daemon startup and as a recovery step.
+export function ensureSavedWifiConnected(): Promise<void> {
+  return new Promise((resolve) => {
+    exec("nmcli -t -f NAME,TYPE,STATE con show", (err, stdout) => {
+      if (err) { resolve(); return; }
+      const lines = stdout.trim().split('\n');
+      let target: string | null = null;
+      let alreadyActive = false;
+      for (const line of lines) {
+        const [name, type, state] = line.split(':');
+        if (type !== '802-11-wireless') continue;
+        if (name === 'frc-provision') continue;
+        if (state === 'activated') { alreadyActive = true; break; }
+        if (!target) target = name;
+      }
+      if (alreadyActive || !target) { resolve(); return; }
+      console.log(`[wifi] no active wifi connection; bringing up saved profile "${target}"`);
+      execFile('sudo', ['/usr/local/bin/frc-wifi-up', target], { timeout: 35000 },
+        (e, _o, stderr) => {
+          if (e) console.warn(`[wifi] couldn't bring up ${target}: ${stderr || e.message}`);
+          else console.log(`[wifi] saved profile ${target} activated`);
+          resolve();
+        });
+    });
+  });
+}
+
 export function hasDefaultRoute(): Promise<boolean> {
   return new Promise((resolve) => {
     exec('ip route show default', (err, stdout) => resolve(!err && stdout.trim().length > 0));

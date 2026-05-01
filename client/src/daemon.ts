@@ -286,6 +286,11 @@ if (httpsServer) {
 connectToServer();
 runNetworkStartup();  // boot-time: 15s grace, then maybe AP
 
+// Bring up any saved wifi profile so the box has a fallback if ethernet
+// drops. NM's autoconnect can silently give up after past failures, so we
+// poke it ourselves at startup.
+import('./wifi.js').then(m => m.ensureSavedWifiConnected().catch(() => {}));
+
 // ── Real-time route monitoring ────────────────────────────────────────────────
 // Kernel netlink notifies us instantly when the default route changes.
 // Combined with a 2s safety poll. This is the ground truth — no protocol guessing.
@@ -330,16 +335,21 @@ startNetworkMonitor(async (hasRoute, reason) => {
 
   if (routeMissingSince === null) {
     routeMissingSince = Date.now();
-    log('warn', '[net] route DOWN — showing connecting screen, AP in 4s');
+    log('warn', '[net] route DOWN — showing connecting screen, trying saved wifi');
     cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(err =>
       log('error', `[net] connecting nav failed: ${err.message}`));
 
+    // Before going to AP mode, try to bring up any saved wifi profile. NM's
+    // autoconnect doesn't always fire reliably after past failures.
+    import('./wifi.js').then(m => m.ensureSavedWifiConnected().catch(() => {}));
+
+    // 12s grace lets a saved-wifi connect succeed before we tear down to AP.
     routeOfflineTimer = setTimeout(() => {
       routeOfflineTimer = null;
       routeMissingSince = null;
-      log('warn', '[net] route still DOWN after 4s — entering AP mode');
+      log('warn', '[net] route still DOWN after 12s — entering AP mode');
       try { state.serverWs?.terminate(); } catch {}
       enterApMode().catch(err => log('error', `[net] enterApMode failed: ${err.message}`));
-    }, 4000);
+    }, 12000);
   }
 });

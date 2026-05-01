@@ -350,6 +350,17 @@ curl -fsSL "\${SERVER_URL}/install.sh" | SERVICE_USER="${SERVICE_USER}" INSTALL_
 SCRIPT
 chmod 755 /usr/local/bin/frc-install
 
+cat > /usr/local/bin/frc-wifi-up << 'SCRIPT'
+#!/bin/bash
+# frc-wifi-up {connection-name}
+# Brings up a saved wifi connection. Used by the daemon at startup to poke
+# NM after its autoconnect has given up.
+NAME="$1"
+[ -z "$NAME" ] && { echo "[frc-wifi-up] needs connection name" >&2; exit 2; }
+nmcli con up "$NAME"
+SCRIPT
+chmod 755 /usr/local/bin/frc-wifi-up
+
 cat > /usr/local/bin/frc-handoff << 'SCRIPT'
 #!/bin/bash
 # frc-handoff {ssid} {password}
@@ -421,7 +432,7 @@ chmod 755 /usr/local/bin/frc-eth-dhcp
 # ── Sudoers for WiFi + ethernet helpers ───────────────────────────────────────
 echo "[10] Configuring sudoers..."
 cat > /etc/sudoers.d/frc-display << SUDOCONF
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-handoff, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-wifi-up, /usr/local/bin/frc-handoff, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm
 SUDOCONF
 chmod 440 /etc/sudoers.d/frc-display
 
