@@ -6,13 +6,17 @@ import {
   setHomeOnOutput, setChromiumOnOutput, setNdiOnOutput, setQueuingOnOutput,
   setHomeAll, setVnc, setPin,
 } from './modes.js';
-import { initOutputs } from './outputs.js';
+import { initOutputs, setOnOutputsChanged } from './outputs.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
 import { localServer, httpsServer, LOCAL_PORT, enterApMode, initServer, stopProvisioningExtras } from './local-server.js';
 import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
 import { startNetworkMonitor } from './network-monitor.js';
 import { sampleMetrics } from './metrics.js';
+import {
+  loadState, initState, recordOutputMode, recordAudio,
+  getPersistedOutputs, getPersistedAudio,
+} from './persistence.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const VERSION      = (await import('../package.json')).version;
@@ -21,14 +25,19 @@ const SERVER_URL   = SERVER_BASE.replace(/^https?:\/\//, m => m === 'https://' ?
 const INSTALL_DIR  = process.env.INSTALL_DIR ?? '/opt/frc-projector-display/client';
 
 const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const PIN   = Array.from({ length: 6 }, () => CHARS[Math.floor(Math.random() * CHARS.length)]).join('');
+function generatePin() {
+  return Array.from({ length: 6 }, () => CHARS[Math.floor(Math.random() * CHARS.length)]).join('');
+}
+const persisted = loadState();
+const PIN = persisted?.pin ?? generatePin();
+if (!persisted) initState(PIN);
 const AP_SSID    = `FRC-Display-${PIN}`;
 const CONTROL_URL = `${SERVER_BASE}/control?pin=${PIN}`;
 
 setPin(PIN);
 initServer(PIN, AP_SSID, CONTROL_URL, VERSION, SERVER_BASE);
 
-console.log(`[daemon] v${VERSION} PIN: ${PIN}`);
+console.log(`[daemon] v${VERSION} PIN: ${PIN}${persisted ? ' (restored)' : ''}`);
 console.log(`[daemon] Control URL: ${CONTROL_URL}`);
 
 // ── Logging helper ────────────────────────────────────────────────────────────
@@ -41,14 +50,32 @@ export function log(level: 'info' | 'warn' | 'error', msg: string) {
 }
 
 // ── Audio polling ─────────────────────────────────────────────────────────────
+let audioReplayed = false;
 function pollAudioSinks(attempt = 0) {
   const delay = attempt === 0 ? 5000 : 15000;
   setTimeout(async () => {
     try {
       const sinks = await getAudioSinks();
       if (sinks.length === 0) { pollAudioSinks(attempt + 1); return; }
-      const astState = await getAudioState();
+      let astState = await getAudioState();
       log('info', `[audio] found ${sinks.length} sink(s)`);
+
+      if (!audioReplayed) {
+        audioReplayed = true;
+        const a = getPersistedAudio();
+        if (a.sink && sinks.find(s => s.name === a.sink)) {
+          log('info', `[state] replaying audio sink ${a.sink}`);
+          await setAudioOutput(a.sink).catch(() => {});
+        }
+        if (typeof a.volume === 'number') {
+          execFile('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${a.volume}%`], { env: process.env }, () => {});
+        }
+        if (typeof a.muted === 'boolean') {
+          execFile('pactl', ['set-sink-mute', '@DEFAULT_SINK@', a.muted ? '1' : '0'], { env: process.env }, () => {});
+        }
+        astState = await getAudioState();
+      }
+
       if (state.serverWs?.readyState === WebSocket.OPEN)
         state.serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state: astState }));
     } catch { pollAudioSinks(attempt + 1); }
@@ -59,6 +86,32 @@ function pollAudioSinks(attempt = 0) {
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let ndiPollInterval:   ReturnType<typeof setInterval> | null = null;
 let metricsInterval:   ReturnType<typeof setInterval> | null = null;
+let hasReplayedOnce = false;
+
+// Re-applies whatever per-output mode was active when the daemon last saved.
+// Runs once per process on the first successful WS open (so the network is
+// known-good before we navigate kiosks to remote URLs and spawn NDI).
+async function replayPersistedOutputs() {
+  const recs = getPersistedOutputs();
+  if (!Object.keys(recs).length) return;
+  log('info', `[state] replaying ${Object.keys(recs).length} output mode(s) from disk`);
+  for (const o of state.outputs) {
+    const r = recs[o.id]; if (!r) continue;
+    try {
+      if (r.mode === 'home')                                       await setHomeOnOutput(o.id);
+      else if (r.mode === 'chromium' && r.url)                     await setChromiumOnOutput(o.id, r.url);
+      else if (r.mode === 'ndi' && r.source)                       setNdiOnOutput(o.id, r.source, r.bandwidth ?? 'high');
+      else if (r.mode === 'queuing' && r.eventKey)                 await setQueuingOnOutput(
+        o.id, r.eventKey,
+        r.streamType === 'ndi' ? 'ndi' : 'youtube',
+        r.streamSource ?? '', r.streamSize ?? 70,
+        r.sidebar ?? 'matches', r.bottom ?? 'updates',
+      );
+    } catch (err: any) {
+      log('error', `[state] replay failed for ${o.id}: ${err.message}`);
+    }
+  }
+}
 
 state.forceWsReconnect = () => {
   log('info', '[ws] force reconnect requested');
@@ -91,15 +144,23 @@ function connectToServer() {
     log('info', '[ws] connected to server');
     state.reconnectDelay = 2000;
 
-    if (state.apMode && !state.postConnectInProgress) {
+    const wasApMode = state.apMode;
+    if (wasApMode && !state.postConnectInProgress) {
       const { stopAp } = await import('./wifi.js');
       if (state.apIface) await stopAp(state.apIface).catch(() => {});
       state.apMode = false; state.apIface = null;
       await stopProvisioningExtras();
     }
-    // Outputs that haven't been individually configured stay on home QR;
-    // mirror the home page across all of them.
-    await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+    if (!hasReplayedOnce && persisted) {
+      hasReplayedOnce = true;
+      await replayPersistedOutputs();
+      // Outputs without a persisted mode stay on the home QR that initOutputs
+      // already navigated them to; nothing to do for them here.
+    } else {
+      // Either fresh-start (no persisted mode) or we just left AP mode and
+      // need to clear the AP page off every kiosk.
+      await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+    }
 
     state.serverWs!.send(JSON.stringify({ type: 'register', pin: PIN, outputs: outputsForRegister() }));
 
@@ -154,26 +215,34 @@ function connectToServer() {
         const outputId: string = msg.output ?? state.outputs[0]?.id;
         if (!outputId) { log('warn', '[ws] set_mode but no outputs available'); break; }
 
-        if (msg.mode === 'home')                       await setHomeOnOutput(outputId);
-        else if (msg.mode === 'chromium' && msg.url)   await setChromiumOnOutput(outputId, msg.url);
-        else if (msg.mode === 'ndi' && msg.source) {
+        if (msg.mode === 'home') {
+          await setHomeOnOutput(outputId);
+          recordOutputMode(outputId, { mode: 'home' });
+        } else if (msg.mode === 'chromium' && msg.url) {
+          await setChromiumOnOutput(outputId, msg.url);
+          recordOutputMode(outputId, { mode: 'chromium', url: msg.url });
+        } else if (msg.mode === 'ndi' && msg.source) {
           if ((msg.source as string).startsWith('omt://')) {
             if (state.serverWs?.readyState === WebSocket.OPEN)
               state.serverWs.send(JSON.stringify({ type: 'error', message: 'OMT playback is not yet supported on Linux. NDI from the same source works fine.' }));
           } else {
             setNdiOnOutput(outputId, msg.source, msg.bandwidth ?? 'high');
+            recordOutputMode(outputId, { mode: 'ndi', source: msg.source, bandwidth: msg.bandwidth ?? 'high' });
           }
-        }
-        else if (msg.mode === 'queuing' && msg.eventKey) {
+        } else if (msg.mode === 'queuing' && msg.eventKey) {
+          const streamType = msg.streamType === 'ndi' ? 'ndi' : 'youtube';
+          const streamSize = msg.streamSize === 60 ? 60 : 70;
+          const sidebar    = msg.sidebar ?? 'matches';
+          const bottom     = msg.bottom  ?? 'updates';
           await setQueuingOnOutput(
-            outputId,
-            msg.eventKey,
-            msg.streamType === 'ndi' ? 'ndi' : 'youtube',
-            msg.streamSource ?? '',
-            msg.streamSize === 60 ? 60 : 70,
-            msg.sidebar ?? 'matches',
-            msg.bottom  ?? 'updates',
+            outputId, msg.eventKey, streamType,
+            msg.streamSource ?? '', streamSize, sidebar, bottom,
           );
+          recordOutputMode(outputId, {
+            mode: 'queuing', eventKey: msg.eventKey,
+            streamType, streamSource: msg.streamSource ?? '',
+            streamSize, sidebar, bottom,
+          });
         }
         break;
       }
@@ -190,6 +259,7 @@ function connectToServer() {
       // A new viewer triggers a fresh start_vnc_bridge.
       case 'set_audio_output':
         if (msg.sink) {
+          recordAudio({ sink: msg.sink });
           setAudioOutput(msg.sink).then(async () => {
             const sinks = await getAudioSinks();
             const astState = await getAudioState();
@@ -200,10 +270,12 @@ function connectToServer() {
         break;
       case 'set_volume': {
         const vol = Math.max(0, Math.min(100, parseInt(msg.volume) || 0));
+        recordAudio({ volume: vol });
         execFile('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${vol}%`], { env: process.env }, () => {});
         break;
       }
       case 'set_mute':
+        recordAudio({ muted: !!msg.muted });
         execFile('pactl', ['set-sink-mute', '@DEFAULT_SINK@', msg.muted ? '1' : '0'], { env: process.env }, () => {});
         break;
     }
@@ -273,6 +345,11 @@ async function runNetworkStartup() {
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+setOnOutputsChanged(() => {
+  if (state.serverWs?.readyState === WebSocket.OPEN) {
+    state.serverWs.send(JSON.stringify({ type: 'outputs_changed', outputs: outputsForRegister() }));
+  }
+});
 await initOutputs();
 log('info', `[outputs] initialised ${state.outputs.length} output(s): ${state.outputs.map(o => o.id).join(', ')}`);
 

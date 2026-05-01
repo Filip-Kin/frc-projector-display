@@ -1,7 +1,10 @@
 import { spawn, exec, ChildProcess } from 'child_process';
+import { readFileSync, existsSync } from 'fs';
 import { state, OutputState } from './state.js';
+import { cdpNavigate } from './cdp.js';
 
-const BASE_CDP_PORT = 9222;
+const CDP_PORT_RANGE = { start: 9222, end: 9230 };
+const LOCAL_PORT = parseInt(process.env.LOCAL_PORT ?? '3000', 10);
 
 interface XrandrOutput {
   id: string;
@@ -65,6 +68,14 @@ async function applyVerticalLayout(outputs: XrandrOutput[]): Promise<void> {
   });
 }
 
+function pickFreeCdpPort(): number {
+  const used = new Set(state.outputs.map(o => o.cdpPort));
+  for (let p = CDP_PORT_RANGE.start; p < CDP_PORT_RANGE.end; p++) {
+    if (!used.has(p)) return p;
+  }
+  throw new Error(`no free cdp port in [${CDP_PORT_RANGE.start},${CDP_PORT_RANGE.end})`);
+}
+
 function spawnChromiumForOutput(o: OutputState): ChildProcess {
   const args = [
     `--user-data-dir=/tmp/chromium-${o.id}`,
@@ -91,8 +102,6 @@ function spawnChromiumForOutput(o: OutputState): ChildProcess {
 }
 
 async function killExistingChromiums(): Promise<void> {
-  // Kill any chromium left over from openbox autostart (legacy installs) or
-  // a previous daemon process that crashed without cleaning up.
   await new Promise<void>(r => exec(
     `pkill -9 -f 'chromium.*--remote-debugging-port' 2>/dev/null; true`,
     () => r()
@@ -109,9 +118,6 @@ export async function initOutputs(): Promise<void> {
     state.outputs = [];
     return;
   }
-  // Sort purely by name. xrandr's "primary" flag isn't stable across reboots
-  // on multi-output Bay Trail (HDMI vs VGA primary flipped between boots),
-  // and that would shuffle Screen-1/Screen-2 labels and chromium positions.
   detected.sort((a, b) => a.id.localeCompare(b.id));
 
   await applyVerticalLayout(detected);
@@ -124,7 +130,7 @@ export async function initOutputs(): Promise<void> {
       height: d.height,
       yOffset: y,
       displayIndex: i,
-      cdpPort: BASE_CDP_PORT + i,
+      cdpPort: CDP_PORT_RANGE.start + i,
       mode: 'home',
       ndiProcess: null,
       chromiumProcess: null,
@@ -139,12 +145,9 @@ export async function initOutputs(): Promise<void> {
   }
 
   startStrayChromiumWatcher();
+  startHotplugWatcher();
 }
 
-// Catches the legacy openbox autostart chromium that races our startup on
-// boxes that haven't re-run install.sh since v1.2.0. Polls for 60s after
-// daemon start; long enough for autostart to settle but short enough to
-// not be a permanent watchdog.
 function startStrayChromiumWatcher() {
   const ourDirs = new Set(state.outputs.map(o => `--user-data-dir=/tmp/chromium-${o.id}`));
   let ticks = 0;
@@ -155,8 +158,8 @@ function startStrayChromiumWatcher() {
       const m = line.match(/^\s*(\d+)\s+(.*chromium\b.*--remote-debugging-port[=\s]\d+.*)/);
       if (!m) continue;
       const args = m[2];
-      if (/--type=/.test(args)) continue;                           // child renderer/etc
-      if ([...ourDirs].some(d => args.includes(d))) continue;       // one of ours
+      if (/--type=/.test(args)) continue;
+      if ([...ourDirs].some(d => args.includes(d))) continue;
       const pid = parseInt(m[1], 10);
       try { process.kill(pid, 'SIGKILL'); } catch {}
       console.log(`[outputs] killed stray chromium pid=${pid}`);
@@ -164,6 +167,106 @@ function startStrayChromiumWatcher() {
     if (ticks < 12) setTimeout(tick, 5000);
   };
   setTimeout(tick, 3000);
+}
+
+// ── Hotplug watcher ─────────────────────────────────────────────────────────
+// Polls /sys/class/drm/*/status. On a NEW connector becoming connected, adds
+// it to the framebuffer (appended to the bottom) and spawns its chromium.
+// Disconnects are no-ops: a brief cable swap should leave the existing window
+// in place so it resumes drawing the moment the connector reattaches. If the
+// reconnected output already exists in state, we still re-issue xrandr just
+// in case X didn't auto-reactivate it.
+export type OutputsChangedCb = () => void;
+let onOutputsChanged: OutputsChangedCb | null = null;
+export function setOnOutputsChanged(cb: OutputsChangedCb) { onOutputsChanged = cb; }
+
+function readDrmConnectors(): { id: string; connected: boolean }[] {
+  // /sys/class/drm/card0-HDMI-A-1/status -> "connected" | "disconnected"
+  // The connector name there is HDMI-A-1 vs xrandr's HDMI-1, so we strip the
+  // `-A` suffix when present.
+  const out: { id: string; connected: boolean }[] = [];
+  try {
+    const dir = readDirSafe('/sys/class/drm');
+    for (const entry of dir) {
+      const m = entry.match(/^card\d+-(.+)$/);
+      if (!m) continue;
+      const sysName = m[1];
+      // Normalize HDMI-A-1 -> HDMI-1, DP-1 stays DP-1, VGA-1 stays VGA-1
+      const id = sysName.replace(/^([A-Z]+)-A-(\d+)$/, '$1-$2');
+      const statusPath = `/sys/class/drm/${entry}/status`;
+      if (!existsSync(statusPath)) continue;
+      try {
+        const status = readFileSync(statusPath, 'utf8').trim();
+        out.push({ id, connected: status === 'connected' });
+      } catch {}
+    }
+  } catch {}
+  return out;
+}
+
+function readDirSafe(p: string): string[] {
+  try { return require('fs').readdirSync(p); } catch { return []; }
+}
+
+async function addOutput(id: string): Promise<void> {
+  const detected = await xrandrQuery();
+  const x = detected.find(d => d.id === id && d.connected);
+  if (!x) { console.log(`[outputs] addOutput: ${id} not yet visible to xrandr`); return; }
+  const yOffset = state.outputs.reduce((s, o) => s + o.height, 0);
+  try {
+    await run('xrandr', ['--output', id, '--auto', '--pos', `0x${yOffset}`]);
+  } catch (err: any) {
+    console.error(`[outputs] xrandr add ${id} failed: ${err.message}`);
+    return;
+  }
+  const cdpPort = pickFreeCdpPort();
+  const displayIndex = state.outputs.length;
+  const o: OutputState = {
+    id, width: x.width, height: x.height, yOffset, displayIndex, cdpPort,
+    mode: 'home', ndiProcess: null, chromiumProcess: null,
+  };
+  state.outputs.push(o);
+  o.chromiumProcess = spawnChromiumForOutput(o);
+  console.log(`[outputs] HOTPLUG add ${id} ${x.width}x${x.height}+0+${yOffset} cdp=${cdpPort}`);
+  // Chromium needs a moment to bind its CDP port; defer the navigate so the
+  // new output lands on the home QR instead of about:blank.
+  setTimeout(() => cdpNavigate(`http://localhost:${LOCAL_PORT}/`, cdpPort).catch(() => {}), 1500);
+  onOutputsChanged?.();
+}
+
+async function reactivateExisting(o: OutputState): Promise<void> {
+  // Defensive: re-run xrandr in case X dropped the mode after a disconnect.
+  // Cheap and idempotent.
+  try {
+    await run('xrandr', ['--output', o.id, '--auto', '--pos', `0x${o.yOffset}`]);
+    console.log(`[outputs] HOTPLUG reactivated ${o.id}`);
+  } catch (err: any) {
+    console.error(`[outputs] reactivate ${o.id} failed: ${err.message}`);
+  }
+}
+
+let lastSeenStatus = new Map<string, boolean>();
+function startHotplugWatcher() {
+  for (const o of state.outputs) lastSeenStatus.set(o.id, true);
+  setInterval(async () => {
+    const conns = readDrmConnectors();
+    for (const c of conns) {
+      const wasSeen   = lastSeenStatus.get(c.id);
+      const knownInUI = state.outputs.find(o => o.id === c.id);
+      if (c.connected && !knownInUI) {
+        // New, unmanaged output appeared
+        try { await addOutput(c.id); } catch (err: any) {
+          console.error(`[outputs] hotplug addOutput failed: ${err.message}`);
+        }
+      } else if (c.connected && knownInUI && wasSeen === false) {
+        // Returning after a disconnect — nudge X to re-light it up
+        await reactivateExisting(knownInUI);
+      }
+      // c.connected && wasSeen: nothing to do
+      // !c.connected: explicitly do nothing (per user direction)
+      lastSeenStatus.set(c.id, c.connected);
+    }
+  }, 5000);
 }
 
 export function getOutput(id: string): OutputState | undefined {

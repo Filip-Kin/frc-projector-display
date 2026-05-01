@@ -119,16 +119,39 @@
   .update-item.parts .team { color: #fa0; font-weight: 700; }
 
   /* ── Rankings widget ── */
-  .rankings-list { display: flex; flex-direction: column; gap: 2px;
-    overflow: hidden; flex: 1; min-height: 0; }
-  .rank-row { display: flex; align-items: center; gap: 10px; padding: 4px 8px;
-    border-radius: 4px; font-size: 0.95rem; flex-shrink: 0; }
-  .rank-row:nth-child(odd) { background: #141414; }
-  .rank-row .rank { width: 36px; color: #888; font-variant-numeric: tabular-nums;
-    font-weight: 700; text-align: right; }
+  /* Sidebar: single column, paginated through pages every 5s.
+     Bottom: multi-column grid, fits as many teams as the strip can hold. */
+  .rankings-list { overflow: hidden; flex: 1; min-height: 0;
+    transition: opacity 200ms ease; }
+  .rankings-list.fade { opacity: 0; }
+  .rankings-list.sidebar { display: flex; flex-direction: column; gap: 4px; }
+  .rankings-list.bottom  { display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    grid-auto-rows: min-content; gap: 4px 10px; align-content: start; }
+  .rank-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
+    border-radius: 5px; flex-shrink: 0; font-size: clamp(0.95rem, 1.7vh, 1.5rem); }
+  .rankings-list.sidebar .rank-row:nth-child(odd) { background: #141414; }
+  .rankings-list.bottom  .rank-row { background: #141414; }
+  .rank-row .rank { min-width: 2.4em; color: #888; font-variant-numeric: tabular-nums;
+    font-weight: 700; text-align: right; font-size: 0.9em; }
   .rank-row .rank.top3 { color: #fa0; }
-  .rank-row .team { flex: 1; color: #ddd; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .rank-row .record { color: #666; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+  .rank-row .team { flex: 1; color: #fff; font-weight: 800; font-variant-numeric: tabular-nums;
+    font-size: 1.25em; }
+  .rank-row .record { color: #666; font-size: 0.78em; font-variant-numeric: tabular-nums;
+    flex-shrink: 0; }
+  .rankings-page-indicator { font-size: 0.75rem; color: #555; font-weight: 500;
+    letter-spacing: 0.05em; margin-left: 8px; }
+
+  /* ── Matches widget — bottom layout (row of 3 cards) ── */
+  .matches-row { display: flex; flex-direction: row; gap: 10px; flex: 1; min-height: 0;
+    overflow: hidden; }
+  .matches-row .match-card {
+    flex: 1 1 0;
+    font-size: clamp(0.85rem, 1.4vh, 1.3rem);
+    /* In a row each card is full sidebar height; let the body fill it the
+       same way the sidebar version does */
+  }
+  .matches-row .match-card.on-field { flex-grow: 1.4; }
 
   .schedule-delta { font-size: 0.95rem; font-weight: 700; padding: 8px 12px;
     border-radius: 6px; text-align: center; flex-shrink: 0; letter-spacing: 0.02em; }
@@ -224,7 +247,7 @@ function statusKind(s) {
   return '';
 }
 
-function widgetMatches(el, data) {
+function widgetMatches(el, data, placement) {
   const all = (data?.matches || []).filter(m => m && m.label);
 
   // Nexus retains status='On field' on every completed match, so the FIRST
@@ -239,7 +262,9 @@ function widgetMatches(el, data) {
   }
   if (startIdx < 0) startIdx = all.findIndex(m => m.status);
   if (startIdx < 0) startIdx = 0;
-  const slice = all.slice(startIdx, startIdx + 5);
+
+  const count = placement === 'bottom' ? 3 : 5;
+  const slice = all.slice(startIdx, startIdx + count);
 
   // Schedule delta from the anchor match (positive ms = behind schedule)
   const anchor = all[startIdx];
@@ -258,9 +283,6 @@ function widgetMatches(el, data) {
     }
   }
 
-  // First card in the slice is the hero (on-field). Subsequent cards style by
-  // their actual status (avoids multiple hero cards when the API echoes
-  // "On field" on already-played matches).
   const cards = slice.map((m, i) => {
     let kind = '';
     if (i === 0) kind = 'on-field';
@@ -269,9 +291,10 @@ function widgetMatches(el, data) {
     return matchCardHtml(m, kind);
   }).join('');
 
+  const listClass = placement === 'bottom' ? 'matches-row' : 'matches-list';
   el.innerHTML = `<div class="col-title">Matches</div>
     ${deltaHtml}
-    <div class="matches-list">${cards || '<div class="empty">No matches scheduled</div>'}</div>`;
+    <div class="${listClass}">${cards || '<div class="empty">No matches scheduled</div>'}</div>`;
 }
 
 function widgetUpdates(el, data) {
@@ -321,34 +344,71 @@ async function fetchRankings() {
   }
 }
 
-function widgetRankings(el) {
-  let body;
+// Sidebar pagination state — keyed by placement so sidebar+bottom rankings
+// don't share an index when both happen to be enabled.
+const rankingsPageIdx = { sidebar: 0, bottom: 0 };
+const SIDEBAR_PAGE_SIZE = 10;
+
+function rankRowHtml(r) {
+  const team = (r.team_key || '').replace(/^frc/, '');
+  const rec = r.record ? `${r.record.wins}-${r.record.losses}-${r.record.ties}` : '';
+  return `<div class="rank-row">
+    <span class="rank ${r.rank <= 3 ? 'top3' : ''}">${r.rank}</span>
+    <span class="team">${esc(team)}</span>
+    <span class="record">${esc(rec)}</span>
+  </div>`;
+}
+
+function widgetRankings(el, placement) {
+  const variant = placement === 'bottom' ? 'bottom' : 'sidebar';
+  let body, titleSuffix = '';
+
   if (rankingsState.error) {
     body = `<div class="empty">Rankings unavailable: ${esc(rankingsState.error)}</div>`;
   } else if (!rankingsState.rows) {
     body = '<div class="empty">Loading…</div>';
   } else if (!rankingsState.rows.length) {
     body = '<div class="empty">No rankings yet</div>';
+  } else if (variant === 'sidebar') {
+    const rows = rankingsState.rows;
+    const totalPages = Math.max(1, Math.ceil(rows.length / SIDEBAR_PAGE_SIZE));
+    if (rankingsPageIdx.sidebar >= totalPages) rankingsPageIdx.sidebar = 0;
+    const page = rankingsPageIdx.sidebar;
+    const slice = rows.slice(page * SIDEBAR_PAGE_SIZE, (page + 1) * SIDEBAR_PAGE_SIZE);
+    body = slice.map(rankRowHtml).join('');
+    if (totalPages > 1) titleSuffix = `<span class="rankings-page-indicator">page ${page + 1}/${totalPages}</span>`;
   } else {
-    const top = rankingsState.rows.slice(0, 32);
-    body = top.map(r => {
-      const team = (r.team_key || '').replace(/^frc/, '');
-      const rec = r.record ? `${r.record.wins}-${r.record.losses}-${r.record.ties}` : '';
-      return `<div class="rank-row">
-        <span class="rank ${r.rank <= 3 ? 'top3' : ''}">${r.rank}</span>
-        <span class="team">${esc(team)}</span>
-        <span class="record">${esc(rec)}</span>
-      </div>`;
-    }).join('');
+    body = rankingsState.rows.map(rankRowHtml).join('');
   }
-  el.innerHTML = `<div class="col-title">Rankings</div>
-    <div class="rankings-list">${body}</div>`;
+
+  el.innerHTML = `<div class="col-title">Rankings${titleSuffix}</div>
+    <div class="rankings-list ${variant}">${body}</div>`;
+}
+
+// Cycle the sidebar page every 5s with a brief fade. Cycling only triggers
+// while the sidebar widget is rankings AND there's more than one page.
+let rankingsCycleTimer = null;
+function maybeStartRankingsCycle() {
+  if (rankingsCycleTimer) return;
+  if (sidebarKind !== 'rankings') return;
+  rankingsCycleTimer = setInterval(() => {
+    if (!rankingsState.rows || rankingsState.rows.length <= SIDEBAR_PAGE_SIZE) return;
+    const totalPages = Math.ceil(rankingsState.rows.length / SIDEBAR_PAGE_SIZE);
+    rankingsPageIdx.sidebar = (rankingsPageIdx.sidebar + 1) % totalPages;
+    const list = sidebarEl.querySelector('.rankings-list');
+    if (list) {
+      list.classList.add('fade');
+      setTimeout(() => { widgetRankings(sidebarEl, 'sidebar'); }, 220);
+    } else {
+      widgetRankings(sidebarEl, 'sidebar');
+    }
+  }, 5000);
 }
 
 const widgets = {
-  matches:  widgetMatches,
-  updates:  widgetUpdates,
-  rankings: (el, _data) => widgetRankings(el),
+  matches:  (el, data, placement) => widgetMatches(el, data, placement),
+  updates:  (el, data, _placement) => widgetUpdates(el, data),
+  rankings: (el, _data, placement) => widgetRankings(el, placement),
   none:     (el) => { el.innerHTML = ''; },
 };
 
@@ -370,8 +430,8 @@ async function pollEvent() {
       return;
     }
     const data = await r.json();
-    (widgets[sidebarKind] || widgets.matches)(sidebarEl, data);
-    (widgets[bottomKind]  || widgets.updates)(bottomEl,  data);
+    (widgets[sidebarKind] || widgets.matches)(sidebarEl, data, 'sidebar');
+    (widgets[bottomKind]  || widgets.updates)(bottomEl,  data, 'bottom');
     statusEl.classList.remove('error');
     statusEl.textContent = `${eventKey} · ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
   } catch (err) {
@@ -383,8 +443,8 @@ async function pollEvent() {
 async function pollRankings() {
   if (sidebarKind !== 'rankings' && bottomKind !== 'rankings') return;
   await fetchRankings();
-  if (sidebarKind === 'rankings') widgetRankings(sidebarEl);
-  if (bottomKind  === 'rankings') widgetRankings(bottomEl);
+  if (sidebarKind === 'rankings') { widgetRankings(sidebarEl, 'sidebar'); maybeStartRankingsCycle(); }
+  if (bottomKind  === 'rankings') widgetRankings(bottomEl, 'bottom');
 }
 
 pollEvent();

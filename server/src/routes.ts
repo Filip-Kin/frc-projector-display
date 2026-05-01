@@ -11,22 +11,28 @@ interface TbaEvent { key: string; name: string; year?: number; }
 
 const tbaEventsByYear = new Map<number, { ts: number; events: TbaEvent[] }>();
 const tbaEventCache   = new Map<string, { ts: number; status: number; body: string }>();
-const resolvedTbaKey  = new Map<string, string>();
+// Maps Nexus key -> TBA key, OR Nexus key -> null to short-circuit known
+// unresolvable events (Worlds practice fields, demo events, etc.) on
+// subsequent /api/webcasts calls without re-walking the full TBA event list.
+const resolvedTbaKey  = new Map<string, string | null>();
 const nexusEventsCache: { ts: number; events: NexusEvent[] } = { ts: 0, events: [] };
 
 function tbaGet(path: string): Promise<{ status: number; body: string }> {
   const apiKey = process.env.TBA_API_KEY;
-  return new Promise((resolve, reject) => {
-    if (!apiKey) return reject(new Error('TBA_API_KEY not set'));
-    https.get({
+  return new Promise((resolve) => {
+    if (!apiKey) return resolve({ status: 503, body: '"TBA_API_KEY not set"' });
+    const req = https.get({
       hostname: 'www.thebluealliance.com',
       path: `/api/v3${path}`,
       headers: { 'X-TBA-Auth-Key': apiKey, 'User-Agent': 'frc-projector-display' },
+      timeout: 5000,
     }, r => {
       let data = '';
       r.on('data', (c: string) => data += c);
       r.on('end', () => resolve({ status: r.statusCode ?? 502, body: data }));
-    }).on('error', reject);
+    });
+    req.on('timeout', () => { req.destroy(); resolve({ status: 504, body: '' }); });
+    req.on('error',   ()  => resolve({ status: 502, body: '' }));
   });
 }
 
@@ -100,15 +106,15 @@ function nameTokens(s: string): Set<string> {
 }
 
 async function resolveNexusKeyToTba(nexusKey: string): Promise<string | null> {
-  if (resolvedTbaKey.has(nexusKey)) return resolvedTbaKey.get(nexusKey)!;
+  if (resolvedTbaKey.has(nexusKey)) return resolvedTbaKey.get(nexusKey) ?? null;
   const yearMatch = nexusKey.match(/^(\d{4})/);
-  if (!yearMatch) return null;
+  if (!yearMatch) { resolvedTbaKey.set(nexusKey, null); return null; }
   const year = parseInt(yearMatch[1], 10);
   const [nexusEvents, tbaEvents] = await Promise.all([
     fetchNexusEvents(), fetchTbaEventsSimple(year),
   ]);
   const nexus = nexusEvents.find(e => e.key === nexusKey);
-  if (!nexus) return null;
+  if (!nexus) { resolvedTbaKey.set(nexusKey, null); return null; }
 
   // Primary: exact normalized name match
   const want = normEventName(nexus.name);
@@ -130,11 +136,12 @@ async function resolveNexusKeyToTba(nexusKey: string): Promise<string | null> {
     for (const t of wantTok) if (haveTok.has(t)) score++;
     if (score > best.score) best = { key: e.key, score };
   }
-  if (best.key) {
+  if (best.key && best.score > 0) {
     resolvedTbaKey.set(nexusKey, best.key);
     console.log(`[tba] resolved nexus=${nexusKey} -> tba=${best.key} (token overlap=${best.score})`);
     return best.key;
   }
+  resolvedTbaKey.set(nexusKey, null);
   console.log(`[tba] could not resolve nexus=${nexusKey} (name=${JSON.stringify(nexus.name)})`);
   return null;
 }
@@ -230,11 +237,20 @@ export function registerRoutes(app: Application) {
     const out: any[] = [];
     for (const ev of events) {
       let tbaEv = await fetchTbaEvent(ev.key).catch(() => null);
+      let usedKey = ev.key;
       if (!tbaEv) {
         const resolved = await resolveNexusKeyToTba(ev.key).catch(() => null);
-        if (resolved) tbaEv = await fetchTbaEvent(resolved).catch(() => null);
+        if (resolved) {
+          tbaEv = await fetchTbaEvent(resolved).catch(() => null);
+          usedKey = resolved;
+        }
       }
-      if (!tbaEv?.webcasts) continue;
+      if (!tbaEv?.webcasts) {
+        console.log(`[webcasts] skip ${ev.key} (no tba match)`);
+        continue;
+      }
+      const ytCount = tbaEv.webcasts.filter((w: any) => w.type === 'youtube' && w.channel).length;
+      console.log(`[webcasts] ${ev.key}->${usedKey}: ${ytCount} youtube webcast(s)`);
       for (const w of tbaEv.webcasts) {
         if (w.type !== 'youtube' || !w.channel) continue;
         // YouTube IDs are 11 chars [A-Za-z0-9_-]; channel IDs are longer

@@ -363,6 +363,7 @@
     <select id="youtube-webcast-select" onchange="onYoutubeWebcastChange('youtube')">
       <option value="">— Custom (enter URL/ID below) —</option>
     </select>
+    <div id="youtube-webcast-status" style="font-size:0.72rem;color:#555;margin-top:4px"></div>
     <div id="youtube-custom-fields">
       <label>YouTube URL or Video ID</label>
       <input type="text" id="youtube-id" placeholder="https://youtube.com/watch?v=... or video ID">
@@ -396,6 +397,7 @@
       <select id="queuing-webcast-select" onchange="onYoutubeWebcastChange('queuing')">
         <option value="">— Custom (enter URL/ID below) —</option>
       </select>
+      <div id="queuing-webcast-status" style="font-size:0.72rem;color:#555;margin-top:4px"></div>
       <div id="queuing-custom-fields">
         <label>YouTube URL or Video ID</label>
         <input type="text" id="queuing-youtube-id" placeholder="https://youtube.com/watch?v=... or video ID">
@@ -552,6 +554,8 @@ function connect() {
       document.getElementById('vnc-quick-btn').style.display = 'none';
     } else if (msg.type === 'ndi_sources') {
       updateNdiSources(msg.sources);
+    } else if (msg.type === 'outputs_changed') {
+      if (msg.outputs) updateOutputs(msg.outputs);
     } else if (msg.type === 'audio_sinks') {
       updateAudioSinks(msg.sinks, msg.state);
     } else if (msg.type === 'metrics') {
@@ -805,11 +809,20 @@ function extractYouTubeId(val) {
 // ── Nexus events ──────────────────────────────────────────────────────────────
 
 async function loadWebcasts() {
+  let err = null;
   try {
     const r = await fetch('/api/webcasts');
-    webcasts = await r.json();
-  } catch { webcasts = []; }
+    if (!r.ok) err = `HTTP ${r.status}`;
+    else webcasts = await r.json();
+  } catch (e) { err = e.message; webcasts = []; }
   populateWebcastDropdowns();
+  for (const id of ['youtube-webcast-status', 'queuing-webcast-status']) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (err) el.textContent = `Could not load webcasts: ${err}`;
+    else if (!webcasts.length) el.textContent = 'No webcasts found for active events.';
+    else el.textContent = `${webcasts.length} webcast${webcasts.length === 1 ? '' : 's'} loaded.`;
+  }
 }
 
 function populateWebcastDropdowns() {

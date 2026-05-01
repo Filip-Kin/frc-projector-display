@@ -61,6 +61,15 @@ export function handleDevice(ws: WebSocket) {
         if (ctrl) send(ctrl, { type: 'audio_sinks', sinks: msg.sinks, state: msg.state });
       }
 
+    } else if (msg.type === 'outputs_changed') {
+      if (!pin) return;
+      const d = devices.get(pin);
+      if (d) {
+        d.outputs = msg.outputs ?? [];
+        const ctrl = controllers.get(pin);
+        if (ctrl) send(ctrl, { type: 'outputs_changed', outputs: msg.outputs ?? [] });
+      }
+
     } else if (msg.type === 'metrics') {
       if (!pin || !msg.metrics) return;
       const d = devices.get(pin);
