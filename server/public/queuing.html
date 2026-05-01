@@ -139,7 +139,7 @@
     align-content: start;
   }
   .rank-row {
-    display: flex; align-items: baseline; gap: 8px; padding: 4px 8px;
+    display: flex; align-items: center; gap: 8px; padding: 4px 8px;
     border-radius: 4px;
     /* Each row spans its grid track / flex line; without width:100% the
        auto-margin RP only reaches the row's intrinsic content edge. */
@@ -504,23 +504,20 @@ function widgetRankings(el, placement) {
       body = slice.map(rankRowHtml).join('');
       if (totalPages > 1) titleSuffix = `<span class="rankings-page-indicator">page ${page + 1}/${totalPages}</span>`;
     } else {
-      // Pick page size that splits evenly into BOTTOM_COLS so each page
-      // renders as a full grid (no orphan column with 2 entries while the
-      // rest have 6). Pick the smallest pages × cols × rows >= total.
+      // Each page fills BOTTOM_PAGE_SIZE (cols × max-rows = 30 entries) until
+      // the last, which may be partial. Earlier code distributed evenly
+      // across pages, which capped row-per-col below the max even when full
+      // pages were possible. Now the first N-1 pages are always full grids;
+      // the last page sizes its rows to match its slice so 75 teams page as
+      // 30 + 30 + 15 (full / full / 3 rows × 5 cols).
       const totalPages = Math.max(1, Math.ceil(rows.length / BOTTOM_PAGE_SIZE));
-      const rowsPerCol = Math.min(BOTTOM_ROWS_MAX, Math.ceil(rows.length / (totalPages * BOTTOM_COLS)));
-      const perPage = rowsPerCol * BOTTOM_COLS;
       if (rankingsPageIdx.bottom >= totalPages) rankingsPageIdx.bottom = 0;
       const page = rankingsPageIdx.bottom;
-      const slice = rows.slice(page * perPage, (page + 1) * perPage);
+      const slice = rows.slice(page * BOTTOM_PAGE_SIZE, (page + 1) * BOTTOM_PAGE_SIZE);
       body = slice.map(rankRowHtml).join('');
-      // Explicit grid-template-rows so column-first flow knows how tall each
-      // column is (otherwise auto-flow column would put everything in 1 col).
-      // minmax(0, 1fr) so rows distribute evenly within whatever vertical
-      // space the bottom strip has — important since #bottom now has a
-      // padding-bottom for the fixed clock; auto-sized rows would overflow.
-      const colsThisPage = Math.min(BOTTOM_COLS, Math.ceil(slice.length / rowsPerCol));
-      extraStyle = `style="grid-template-rows: repeat(${rowsPerCol}, minmax(0, 1fr)); grid-template-columns: repeat(${colsThisPage}, 1fr);"`;
+      const rowsThisPage = Math.min(BOTTOM_ROWS_MAX, Math.ceil(slice.length / BOTTOM_COLS));
+      const colsThisPage = Math.min(BOTTOM_COLS, Math.ceil(slice.length / rowsThisPage));
+      extraStyle = `style="grid-template-rows: repeat(${rowsThisPage}, minmax(0, 1fr)); grid-template-columns: repeat(${colsThisPage}, 1fr);"`;
       if (totalPages > 1) titleSuffix = `<span class="rankings-page-indicator">page ${page + 1}/${totalPages}</span>`;
     }
   }

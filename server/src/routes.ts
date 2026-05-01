@@ -1,6 +1,28 @@
 import type { Application } from 'express';
 import { join } from 'path';
 import https from 'https';
+import QRCode from 'qrcode';
+
+// ── Shared kiosk pages ──────────────────────────────────────────────────────
+// Single source of truth for screens that need to look identical between the
+// daemon (full thin-client) and the lite browser kiosk. The daemon's `/`
+// route redirects here when it's online; the lite page navigates its
+// stage iframe here for the home view.
+
+async function renderQrPage(opts: { pin: string; controlUrl: string; serverHost: string; version?: string }) {
+  const qr = await QRCode.toDataURL(opts.controlUrl, {
+    width: 320, margin: 2, color: { dark: '#000', light: '#fff' },
+  });
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>FRC Display</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:28px}h1{font-size:2.4rem;font-weight:700;letter-spacing:.02em}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #4af4}.qr-box img{display:block;width:280px;height:280px}.pin-label{font-size:1rem;color:#aaa;margin-bottom:4px}.pin{font-size:3rem;font-weight:800;letter-spacing:.25em;color:#4af}.url{font-size:.85rem;color:#555;word-break:break-all;text-align:center;max-width:480px}.version{font-size:1rem;color:#777;position:fixed;bottom:12px;right:16px}</style>
+</head><body>
+<h1>Configure Display</h1>
+<div class="qr-box"><img src="${qr}" alt="QR"></div>
+<div><div class="pin-label">PIN</div><div class="pin">${opts.pin}</div></div>
+<div class="url">${opts.serverHost}</div>
+${opts.version ? `<div class="version">v${opts.version}</div>` : ''}
+</body></html>`;
+}
 
 interface NexusEvent { key: string; name: string; start: number; end: number; }
 interface TbaEvent { key: string; name: string; year?: number; }
@@ -160,6 +182,18 @@ export function registerRoutes(app: Application) {
   app.get('/install.sh', (_req, res) => {
     res.setHeader('Content-Type', 'text/plain');
     res.sendFile(join(import.meta.dir, '../client-dist/install.sh'));
+  });
+
+  // QR / home screen — used by both daemon (redirects here from its local /
+  // route when online) and lite (iframes here for home mode). Single source
+  // of truth so both look identical.
+  app.get('/qr', async (req, res) => {
+    const pin = String(req.query.pin ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    if (!pin) { res.status(400).send('missing pin'); return; }
+    const controlUrl = `${req.protocol === 'http' ? 'http' : 'https'}://${req.get('host') ?? 'display.filipkin.com'}/control?pin=${pin}`;
+    const serverHost = req.get('host') ?? 'display.filipkin.com';
+    const version = req.query.version ? String(req.query.version) : undefined;
+    res.send(await renderQrPage({ pin, controlUrl, serverHost, version }));
   });
 
   // Per-event status proxy — projector queuing pages poll this every 15s.

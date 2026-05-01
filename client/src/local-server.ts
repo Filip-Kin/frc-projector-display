@@ -123,22 +123,19 @@ app.get('/', async (req, res) => {
     return res.send(buildProvisioningStatusPage(state.provisioningStatus));
   }
   if (state.apMode) {
-    // Phone connecting via AP → serve the setup form directly at /
-    // (clean URL the captive portal browser was redirected to)
     const host = (req.get('host') ?? '').split(':')[0];
     if (host === AP_IP) {
-      // Phone successfully reached the setup page — clear the ghost-client
-      // watch so we don't escalate when the captive portal worked fine.
       const ip = (req.ip ?? req.socket.remoteAddress ?? '').replace('::ffff:', '');
       if (ip) clearProbeWatch(ip);
       return res.send(buildSetupPage(cachedNetworks));
     }
-    // Local Chromium kiosk on projector → show the two-step setup screen
     return res.send(await buildApPageAsync());
   }
-  // Not in AP mode — projector home QR
-  const qr = await QRCode.toDataURL(CONTROL_URL, { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
-  res.send(buildQrPage(qr));
+  // Not in AP mode — redirect the kiosk to the server-rendered QR page.
+  // Single source of truth so the daemon and the /lite browser kiosk look
+  // identical. WS being up implies internet, so the public server is
+  // reachable; offline kiosks never hit this route (they go to /connecting).
+  res.redirect(302, `${SERVER_BASE}/qr?pin=${encodeURIComponent(PIN)}&version=${encodeURIComponent(VERSION)}`);
 });
 
 app.get('/youtube', async (req, res) => {
@@ -564,18 +561,6 @@ export const httpsServer = (existsSync(CERT_PATH) && existsSync(KEY_PATH))
   : null;
 
 // ── HTML builders ─────────────────────────────────────────────────────────────
-
-function buildQrPage(qrDataUrl: string) {
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>FRC Display</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:28px}h1{font-size:2.4rem;font-weight:700;letter-spacing:.02em}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #4af4}.qr-box img{display:block;width:280px;height:280px}.pin-label{font-size:1rem;color:#aaa;margin-bottom:4px}.pin{font-size:3rem;font-weight:800;letter-spacing:.25em;color:#4af}.url{font-size:.85rem;color:#555;word-break:break-all;text-align:center;max-width:480px}.version{font-size:1rem;color:#777;position:fixed;bottom:12px;right:16px}</style>
-</head><body>
-<h1>Configure Display</h1>
-<div class="qr-box"><img src="${qrDataUrl}" alt="QR"></div>
-<div><div class="pin-label">PIN</div><div class="pin">${PIN}</div></div>
-<div class="url">${SERVER_BASE.replace(/^https?:\/\//, '')}</div>
-<div class="version">v${VERSION}</div>
-</body></html>`;
-}
 
 async function buildApPageAsync() {
   // Out-of-band provisioning in flight (USB plugged in, BLE creds received) ->

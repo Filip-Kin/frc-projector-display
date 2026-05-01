@@ -3,235 +3,138 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FRC Display (lite)</title>
+<title>FRC Display</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 100vw; height: 100vh; overflow: hidden; background: #000;
-    color: #f0f0f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-
+  html, body { width: 100vw; height: 100vh; overflow: hidden; background: #000; }
+  /* Lite is a thin shell. Everything visual lives inside #stage, which loads
+     server-rendered pages (/qr for home, /queuing, /youtube, etc.) so the
+     UI is identical to what the daemon shows. No overlay, no buttons, no
+     indicators — just the iframe. */
   #stage { position: fixed; inset: 0; width: 100%; height: 100%; border: 0;
-    background: #000; }
-
-  /* Home overlay: shown initially and whenever the active mode is 'home'.
-     Once a non-home mode is applied this slides out so the iframe takes over. */
-  #overlay { position: fixed; inset: 0; background: #111;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 28px; z-index: 10; transition: opacity 200ms ease; }
-  #overlay.hidden { opacity: 0; pointer-events: none; }
-  #overlay h1 { font-size: 2.4rem; font-weight: 700; letter-spacing: 0.02em; }
-  .qr-box { background: #fff; padding: 16px; border-radius: 16px; box-shadow: 0 0 60px #4af4; }
-  .qr-box img { display: block; width: 280px; height: 280px; }
-  .pin-block { text-align: center; }
-  .pin-label { font-size: 1rem; color: #aaa; margin-bottom: 4px; }
-  .pin       { font-size: 3rem; font-weight: 800; letter-spacing: 0.25em; color: #4af; }
-  .url       { font-size: 0.85rem; color: #555; word-break: break-all; text-align: center;
-    max-width: 480px; }
-  .fs-btn { background: #4af; color: #000; border: none; border-radius: 8px;
-    padding: 14px 28px; font-size: 1.05rem; font-weight: 700; cursor: pointer; }
-  .fs-btn:disabled { background: #2a2a2a; color: #666; cursor: default; }
-  .footnote { font-size: 0.7rem; color: #444; max-width: 540px; text-align: center;
-    line-height: 1.5; padding: 0 16px; }
-  .footnote strong { color: #888; }
-  .version { font-size: 0.85rem; color: #555; position: fixed; bottom: 8px; right: 12px; z-index: 11; }
-  .ws-state { font-size: 0.7rem; color: #444; position: fixed; top: 8px; right: 12px; z-index: 11;
-    text-transform: uppercase; letter-spacing: 0.1em; }
-  .ws-state.connected { color: #4f4; }
-  .ws-state.offline   { color: #f66; }
-
-  /* Floating "exit fullscreen / home" button shown once a non-home mode is
-     active, so the operator on the box itself has a way back without the
-     phone. Hidden by default; shown on mouse move (chromium kiosks usually
-     have unclutter, which this respects). */
-  #exit-btn { position: fixed; top: 8px; left: 8px; z-index: 11;
-    background: #2228; color: #aaa; border: 1px solid #3338; border-radius: 6px;
-    padding: 6px 10px; font-size: 0.78rem; cursor: pointer; opacity: 0;
-    transition: opacity 200ms ease; }
-  #exit-btn:hover, body:hover #exit-btn { opacity: 0.7; }
+    background: #000; display: block; }
+  /* Invisible click-anywhere layer until the user has interacted once;
+     fullscreen needs a user gesture, but we don't want a visible button.
+     The layer hides itself after the first click. */
+  #fs-trap { position: fixed; inset: 0; z-index: 1; cursor: pointer;
+    background: transparent; }
+  #fs-trap.gone { display: none; }
 </style>
 </head>
 <body>
 
 <iframe id="stage" allow="autoplay; fullscreen" allowfullscreen></iframe>
-
-<div id="overlay">
-  <h1>FRC Display</h1>
-  <div class="qr-box"><img id="qr" alt="QR"></div>
-  <div class="pin-block">
-    <div class="pin-label">PIN</div>
-    <div class="pin" id="pin">------</div>
-  </div>
-  <div class="url" id="control-url"></div>
-  <button id="fs-btn" class="fs-btn" onclick="enterFullscreen()">Tap to enter fullscreen</button>
-  <div class="footnote">
-    Lite mode runs in a browser tab. <strong>Some sites refuse to be embedded</strong>
-    (Custom URL with <code>X-Frame-Options: DENY</code> or strict
-    <code>frame-ancestors</code>). NDI, audio routing, VNC, and Wi-Fi
-    provisioning aren't available — those need a full thin-client install.
-  </div>
-</div>
-
-<button id="exit-btn" onclick="goHome()">⌂ Home</button>
-<div class="ws-state" id="ws-state">connecting</div>
+<div id="fs-trap" title="Click anywhere to enter fullscreen"></div>
 
 <script>
 // ── PIN persistence (localStorage, 4-day expiry) ────────────────────────────
 const PIN_TTL_MS = 4 * 24 * 60 * 60 * 1000;
 const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-function newPin() {
-  return Array.from({length:6}, () => CHARS[Math.floor(Math.random()*CHARS.length)]).join('');
-}
+function newPin() { return Array.from({length:6}, () => CHARS[Math.floor(Math.random()*CHARS.length)]).join(''); }
 function loadPin() {
   try {
-    const raw = localStorage.getItem('frc-lite-pin');
-    if (raw) {
-      const o = JSON.parse(raw);
-      if (o.pin && o.createdAt && Date.now() - o.createdAt < PIN_TTL_MS) return o.pin;
-    }
+    const o = JSON.parse(localStorage.getItem('frc-lite-pin') || 'null');
+    if (o?.pin && o.createdAt && Date.now() - o.createdAt < PIN_TTL_MS) return o.pin;
   } catch {}
   const pin = newPin();
   localStorage.setItem('frc-lite-pin', JSON.stringify({ pin, createdAt: Date.now() }));
   return pin;
 }
-function loadLastMode() {
-  try { return JSON.parse(localStorage.getItem('frc-lite-lastmode') || 'null'); }
-  catch { return null; }
-}
-function saveLastMode(msg) {
-  try { localStorage.setItem('frc-lite-lastmode', JSON.stringify(msg)); } catch {}
-}
+function loadLastMode() { try { return JSON.parse(localStorage.getItem('frc-lite-lastmode') || 'null'); } catch { return null; } }
+function saveLastMode(msg) { try { localStorage.setItem('frc-lite-lastmode', JSON.stringify(msg)); } catch {} }
 
 const PIN = loadPin();
-const CONTROL_URL = `${location.origin}/control?pin=${PIN}`;
-document.getElementById('pin').textContent = PIN;
-document.getElementById('control-url').textContent = CONTROL_URL.replace(/^https?:\/\//, '');
 
-// ── QR for the home overlay (uses the qrcode npm endpoint via a public CDN
-//    fallback would be heavy; instead just inline a minimal pattern via the
-//    Google Charts QR generator. We don't have a QR lib here; use a remote
-//    PNG from quickchart.io which is public + no auth + small).
-//    If you want the same generator the daemon uses, the server could expose
-//    a /qr endpoint backed by node-qrcode; for now this works offline-light. ──
-document.getElementById('qr').src =
-  `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(CONTROL_URL)}&size=280x280&margin=8`;
-
-// ── Fullscreen on user gesture ──────────────────────────────────────────────
-let fullscreenEntered = false;
-function enterFullscreen() {
+// ── Fullscreen on first interaction ─────────────────────────────────────────
+document.getElementById('fs-trap').addEventListener('click', () => {
   const el = document.documentElement;
   const p = el.requestFullscreen?.() || el.webkitRequestFullscreen?.();
-  if (p && p.then) p.then(() => { fullscreenEntered = true; }).catch(() => {});
-  else fullscreenEntered = true;
-  document.getElementById('fs-btn').textContent = 'Fullscreen';
-  document.getElementById('fs-btn').disabled = true;
-}
+  Promise.resolve(p).catch(() => {}).finally(() => {
+    document.getElementById('fs-trap').classList.add('gone');
+  });
+});
 
 // ── Stage iframe + mode handling ────────────────────────────────────────────
-const stage   = document.getElementById('stage');
-const overlay = document.getElementById('overlay');
-let currentMode = 'home';
+const stage = document.getElementById('stage');
+const HOME_URL = `${location.origin}/qr?pin=${encodeURIComponent(PIN)}`;
 
-function showHome() {
-  currentMode = 'home';
-  stage.src = 'about:blank';
-  overlay.classList.remove('hidden');
-}
-function showUrl(url) {
-  // Anything pointing at the daemon's local server (http://localhost:3000)
-  // won't reach a daemon from a lite kiosk; rewrite to the public server
-  // which exposes mirror routes (/youtube, /queuing).
-  if (typeof url === 'string' && /^https?:\/\/localhost:3000/i.test(url)) {
-    url = url.replace(/^https?:\/\/localhost:3000/i, location.origin);
-  }
-  stage.src = url;
-  overlay.classList.add('hidden');
-}
+function setStage(url) { if (stage.src !== url) stage.src = url; }
+function showHome() { setStage(HOME_URL); }
 
 function applyMode(msg) {
-  if (msg.mode === 'home') {
-    showHome();
-    saveLastMode(msg);
-  } else if (msg.mode === 'chromium' && msg.url) {
-    currentMode = 'chromium';
-    showUrl(msg.url);
-    saveLastMode(msg);
-  } else if (msg.mode === 'queuing' && msg.eventKey) {
+  if (msg.mode === 'home') { showHome(); saveLastMode(msg); return; }
+  if (msg.mode === 'chromium' && msg.url) {
+    // Daemon-side URLs hit http://localhost:3000 which a lite kiosk can't
+    // reach; rewrite to the public origin where /youtube and /queuing are
+    // mirrored.
+    let url = msg.url;
+    if (/^https?:\/\/localhost:3000/i.test(url)) {
+      url = url.replace(/^https?:\/\/localhost:3000/i, location.origin);
+    }
+    setStage(url); saveLastMode(msg); return;
+  }
+  if (msg.mode === 'queuing' && msg.eventKey) {
     const u = new URL(`${location.origin}/queuing`);
-    u.searchParams.set('event', msg.eventKey);
-    u.searchParams.set('stream', msg.streamType === 'ndi' ? 'ndi' : 'youtube');
+    u.searchParams.set('event',   msg.eventKey);
+    u.searchParams.set('stream',  msg.streamType === 'ndi' ? 'ndi' : 'youtube');
     u.searchParams.set('size',    String(msg.streamSize ?? 70));
     u.searchParams.set('sidebar', msg.sidebar ?? 'matches');
     u.searchParams.set('bottom',  msg.bottom  ?? 'updates');
     if (msg.streamSource) u.searchParams.set('streamId', msg.streamSource);
-    currentMode = 'queuing';
-    showUrl(u.toString());
-    saveLastMode(msg);
-  } else if (msg.mode === 'ndi') {
-    // NDI requires X11 + ndi-play; not possible in a browser.
+    setStage(u.toString()); saveLastMode(msg); return;
+  }
+  if (msg.mode === 'ndi') {
+    // NDI needs X11 + ndi-play; not possible in a browser.
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'error', message: 'NDI is not supported in lite mode (no daemon).' }));
     }
+    return;
   }
 }
 
-function goHome() { applyMode({ mode: 'home' }); }
-
 // ── WebSocket: register as a 'lite' device ──────────────────────────────────
-const wsState = document.getElementById('ws-state');
 const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/device`;
 let ws = null;
 let reconnectDelay = 1000;
 let lastModeRehydrated = false;
 
 function connect() {
-  wsState.className = 'ws-state'; wsState.textContent = 'connecting';
   ws = new WebSocket(wsUrl);
-
   ws.onopen = () => {
-    wsState.className = 'ws-state connected'; wsState.textContent = 'online';
     reconnectDelay = 1000;
     ws.send(JSON.stringify({
       type: 'register', pin: PIN, kind: 'lite',
       outputs: [{ id: 'screen', width: window.innerWidth, height: window.innerHeight }],
     }));
-    // On first connect after page load, re-apply the last mode (if any) so
-    // a tab refresh restores whatever was on screen. Skip on subsequent
-    // reconnects so we don't blink the iframe every time WS drops.
     if (!lastModeRehydrated) {
       lastModeRehydrated = true;
       const m = loadLastMode();
-      if (m) applyMode(m);
+      if (m) applyMode(m); else showHome();
     }
   };
-
   ws.onmessage = (e) => {
     let msg; try { msg = JSON.parse(e.data); } catch { return; }
-    if (msg.type === 'set_mode') {
-      applyMode(msg);
-    } else if (msg.type === 'refresh_ndi') {
-      // Lite doesn't have NDI sources, but reply with empty so /control's
-      // Refresh button doesn't hang.
+    if (msg.type === 'set_mode') applyMode(msg);
+    else if (msg.type === 'refresh_ndi') {
+      // Lite has no NDI sources; reply empty so /control's button doesn't hang.
       if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ndi_sources', sources: [] }));
     }
     // set_audio_output / set_volume / set_mute / start_vnc_bridge: silently no-op
   };
-
   ws.onclose = () => {
-    wsState.className = 'ws-state offline'; wsState.textContent = 'reconnecting';
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 1.5, 8000);
   };
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
-// Heartbeat so the server's lastSeen stays fresh
-setInterval(() => {
-  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'heartbeat' }));
-}, 30000);
+setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'heartbeat' })); }, 30000);
 
 connect();
 
-// First-time visit shows the home overlay automatically; later visits with a
-// stored last mode skip straight to it (rehydrated above on open).
+// First-time visit (no saved mode) shows home; later visits will get
+// rehydrated by lastModeRehydrated above on WS open. Render home eagerly so
+// the page isn't briefly blank if the WS takes a moment to connect.
 if (!loadLastMode()) showHome();
 </script>
 </body>
