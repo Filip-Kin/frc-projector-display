@@ -253,3 +253,38 @@ localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
 
 connectToServer();
 runNetworkStartup();  // starts after 15s, may enter AP mode if no route
+
+// Belt-and-suspenders: poll kernel default route every 2s.
+// When ethernet is unplugged, the route disappears instantly — this is
+// the ground truth, faster and more reliable than WS ping/pong.
+import { exec } from 'child_process';
+let routeMissingSince: number | null = null;
+setInterval(() => {
+  exec('ip route show default', (err, stdout) => {
+    const hasRoute = !err && stdout.trim().length > 0;
+    if (hasRoute) {
+      routeMissingSince = null;
+      return;
+    }
+    if (state.apMode) return; // already in AP — nothing to do
+    // NDI streaming directly to local source — don't disrupt
+    const ndiActive = state.currentMode === 'ndi' && state.ndiProcess !== null;
+    if (ndiActive) return;
+
+    if (routeMissingSince === null) {
+      routeMissingSince = Date.now();
+      log('warn', '[net] default route gone — starting offline countdown');
+      // Show connecting screen immediately
+      cdpNavigate(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+      return;
+    }
+    // Route gone for ≥4s → enter AP mode
+    if (Date.now() - routeMissingSince >= 4000) {
+      log('warn', '[net] default route absent 4s+ — entering AP mode');
+      routeMissingSince = null;
+      // Force WS close so reconnect loop knows
+      try { state.serverWs?.terminate(); } catch {}
+      enterApMode().catch(() => {});
+    }
+  });
+}, 2000);
