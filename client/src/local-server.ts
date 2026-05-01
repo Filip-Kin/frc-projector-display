@@ -75,7 +75,19 @@ app.get('/api/debug', async (_req, res) => {
   });
 });
 
-app.get('/api/wifi-scan', async (_req, res) => res.json(await scanWifi().catch(() => [])));
+// Cached scan results from before the AP came up — running a live scan while
+// the AP is broadcasting briefly drops the radio off-channel and disconnects
+// connected phones (single-radio cards like rtl8723be). We do ONE scan in
+// enterApMode() before starting the AP, then serve those results until the
+// AP is torn down.
+let cachedNetworks: { ssid: string; signal: number; secured: boolean }[] = [];
+export function setCachedNetworks(networks: typeof cachedNetworks) { cachedNetworks = networks; }
+
+app.get('/api/wifi-scan', async (_req, res) => {
+  // Always serve cached results — never live scan while AP is up
+  if (state.apMode) return res.json(cachedNetworks);
+  res.json(await scanWifi().catch(() => []));
+});
 
 app.get('/api/eth-status', async (_req, res) => {
   const iface = await getEthernetInterface();
@@ -113,7 +125,9 @@ app.get('/api/internet-status', async (_req, res) => {
 });
 
 app.get('/setup', async (_req, res) => {
-  const networks = await scanWifi().catch(() => []);
+  // In AP mode: serve from cache (scan was done before AP started)
+  // Out of AP mode (manual nav): live scan
+  const networks = state.apMode ? cachedNetworks : await scanWifi().catch(() => []);
   res.send(buildSetupPage(networks));
 });
 
@@ -205,6 +219,17 @@ export async function enterApMode() {
     return;
   }
 
+  // Pre-scan WiFi networks BEFORE bringing up the AP — once the AP is broadcasting,
+  // any scan would briefly off-channel the radio and disconnect connected phones.
+  console.log('[ap] pre-scanning WiFi networks…');
+  try {
+    cachedNetworks = await scanWifi();
+    console.log(`[ap] cached ${cachedNetworks.length} networks for setup page`);
+  } catch (err: any) {
+    console.error(`[ap] pre-scan failed: ${err.message}`);
+    cachedNetworks = [];
+  }
+
   console.log(`[ap] starting hotspot ${AP_SSID} on ${iface}`);
   try {
     await startAp(PIN, iface);
@@ -261,7 +286,7 @@ function buildSetupPage(networks: { ssid: string; signal: number; secured: boole
 <h1>WiFi Setup</h1>
 <div class="section-title">Nearby Networks</div>
 <div class="net-list" id="net-list">${netRows || '<div style="padding:12px 14px;color:#555;font-size:.9rem">No networks found</div>'}</div>
-<button style="font-size:.8rem;background:none;border:none;color:#4af;cursor:pointer;padding:6px 0;display:block" onclick="refreshScan()">↻ Refresh scan</button>
+<div style="font-size:.75rem;color:#555;padding:4px 0">List captured before hotspot started — type SSID manually for a hidden network.</div>
 <div class="section-title">Network</div>
 <input type="text" id="ssid" placeholder="Network name">
 <label>Password <span style="color:#555">(leave blank for open networks)</span></label>
