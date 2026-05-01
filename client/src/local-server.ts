@@ -518,19 +518,17 @@ async function buildApPageAsync() {
   }
   const wifiQr = await QRCode.toDataURL(`WIFI:T:nopass;S:${AP_SSID};;`,
     { width: 280, margin: 2, color: { dark: '#000', light: '#fff' } });
-  // Standard captive-portal page is primary; the BLE/USB alternatives only
-  // appear once we've detected a phone bouncing off the captive portal.
-  const escalated = state.apEscalateImprov;
+  // Show all three provisioning options up front. WiFi captive portal is
+  // primary; BLE + USB sit alongside as alternatives so an operator who
+  // knows their Android disassociates can skip straight to BLE/USB.
   const wifiSetupUrl = `${SERVER_BASE}/wifi`;
-  let altsBlock = '';
-  if (escalated) {
-    const bleQr = await QRCode.toDataURL(wifiSetupUrl,
-      { width: 200, margin: 2, color: { dark: '#000', light: '#fff' } });
-    altsBlock = `
-  <div class="alts-title">Phone disconnecting? Try one of these instead:</div>
+  const bleQr = await QRCode.toDataURL(wifiSetupUrl,
+    { width: 200, margin: 2, color: { dark: '#000', light: '#fff' } });
+  const altsBlock = `
+  <div class="alts-title">Or use one of these alternatives:</div>
   <div class="alts">
     <div class="alt">
-      <strong>Bluetooth setup (recommended)</strong>
+      <strong>Bluetooth setup</strong>
       <p>Scan this QR or visit <code>${wifiSetupUrl.replace(/^https?:\/\//, '')}</code> in Chrome on Android. Phone needs cellular data; no WiFi join required.</p>
       <div class="alt-qr"><img src="${bleQr}" alt="Wi-Fi setup QR"></div>
     </div>
@@ -541,7 +539,6 @@ async function buildApPageAsync() {
 password=secret</code>
     </div>
   </div>`;
-  }
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WiFi Setup</title>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}

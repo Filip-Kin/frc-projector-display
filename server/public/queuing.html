@@ -119,27 +119,30 @@
   .update-item.parts .team { color: #fa0; font-weight: 700; }
 
   /* ── Rankings widget ── */
-  /* Sidebar: single column, paginated through pages every 5s.
-     Bottom: multi-column grid, fits as many teams as the strip can hold. */
+  /* CSS multicolumn for both sidebar (1 column tall) and bottom (multi-column,
+     auto-flow column-first so reading goes top→bottom then left→right). */
   .rankings-list { overflow: hidden; flex: 1; min-height: 0;
-    transition: opacity 200ms ease; }
+    transition: opacity 400ms ease; }
   .rankings-list.fade { opacity: 0; }
-  .rankings-list.sidebar { display: flex; flex-direction: column; gap: 4px; }
-  .rankings-list.bottom  { display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-    grid-auto-rows: min-content; gap: 4px 10px; align-content: start; }
-  .rank-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px;
-    border-radius: 5px; flex-shrink: 0; font-size: clamp(0.95rem, 1.7vh, 1.5rem); }
-  .rankings-list.sidebar .rank-row:nth-child(odd) { background: #141414; }
-  .rankings-list.bottom  .rank-row { background: #141414; }
-  .rank-row .rank { min-width: 2.4em; color: #888; font-variant-numeric: tabular-nums;
-    font-weight: 700; text-align: right; font-size: 0.9em; }
+  .rankings-list.sidebar { column-count: 1; column-gap: 0; }
+  .rankings-list.bottom  { column-width: 130px; column-gap: 12px; }
+  .rank-row {
+    display: flex; align-items: baseline; gap: 8px; padding: 4px 6px;
+    border-radius: 4px;
+    font-size: clamp(0.95rem, 1.7vh, 1.5rem);
+    /* break-inside avoid: never split a row mid-column */
+    break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
+  }
+  .rank-row .rank { width: 2em; color: #888; font-variant-numeric: tabular-nums;
+    font-weight: 700; text-align: right; font-size: 0.85em; flex-shrink: 0; }
   .rank-row .rank.top3 { color: #fa0; }
-  .rank-row .team { flex: 1; color: #fff; font-weight: 800; font-variant-numeric: tabular-nums;
-    font-size: 1.25em; }
-  .rank-row .record { color: #666; font-size: 0.78em; font-variant-numeric: tabular-nums;
-    flex-shrink: 0; }
-  .rankings-page-indicator { font-size: 0.75rem; color: #555; font-weight: 500;
+  .rank-row .team { color: #fff; font-weight: 800; font-variant-numeric: tabular-nums;
+    font-size: 1.2em; flex: 1; }
+  .rank-row .rp { color: #6cf; font-size: 0.78em; font-weight: 700;
+    font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .rankings-list.sidebar .rank-row:nth-child(even) { background: #141414; }
+  .rankings-list.bottom  .rank-row { background: #141414; margin-bottom: 3px; }
+  .rankings-page-indicator { font-size: 0.7rem; color: #555; font-weight: 500;
     letter-spacing: 0.05em; margin-left: 8px; }
 
   /* ── Matches widget — bottom layout (row of 3 cards) ── */
@@ -151,7 +154,13 @@
     /* In a row each card is full sidebar height; let the body fill it the
        same way the sidebar version does */
   }
-  .matches-row .match-card.on-field { flex-grow: 1.4; }
+  .matches-row .match-card.on-field {
+    flex-grow: 1.4;
+    /* Drop the box-shadow in the row layout — at row gap of 10px the glow
+       bleeds well past the card's apparent border, looking like the bg is
+       overflowing. */
+    box-shadow: none;
+  }
 
   .schedule-delta { font-size: 0.95rem; font-weight: 700; padding: 8px 12px;
     border-radius: 6px; text-align: center; flex-shrink: 0; letter-spacing: 0.02em; }
@@ -347,15 +356,19 @@ async function fetchRankings() {
 // Sidebar pagination state — keyed by placement so sidebar+bottom rankings
 // don't share an index when both happen to be enabled.
 const rankingsPageIdx = { sidebar: 0, bottom: 0 };
-const SIDEBAR_PAGE_SIZE = 10;
+const SIDEBAR_PAGE_SIZE = 22;
+const RANKINGS_CYCLE_MS = 8000;
 
 function rankRowHtml(r) {
   const team = (r.team_key || '').replace(/^frc/, '');
-  const rec = r.record ? `${r.record.wins}-${r.record.losses}-${r.record.ties}` : '';
+  // TBA exposes ranking points as the first element of extra_stats; the
+  // label/precision live in the per-event extra_stats_info[0]. Show it as
+  // "## RP" beside the team number.
+  const rp = Array.isArray(r.extra_stats) && r.extra_stats.length ? r.extra_stats[0] : null;
   return `<div class="rank-row">
     <span class="rank ${r.rank <= 3 ? 'top3' : ''}">${r.rank}</span>
     <span class="team">${esc(team)}</span>
-    <span class="record">${esc(rec)}</span>
+    ${rp != null ? `<span class="rp">${esc(rp)} RP</span>` : ''}
   </div>`;
 }
 
@@ -398,11 +411,11 @@ function maybeStartRankingsCycle() {
     const list = sidebarEl.querySelector('.rankings-list');
     if (list) {
       list.classList.add('fade');
-      setTimeout(() => { widgetRankings(sidebarEl, 'sidebar'); }, 220);
+      setTimeout(() => { widgetRankings(sidebarEl, 'sidebar'); }, 420);
     } else {
       widgetRankings(sidebarEl, 'sidebar');
     }
-  }, 5000);
+  }, RANKINGS_CYCLE_MS);
 }
 
 const widgets = {

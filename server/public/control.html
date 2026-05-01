@@ -195,6 +195,11 @@
     z-index: 100;
   }
   .toast.show { opacity: 1; }
+  /* When the controller WS isn't connected, dim the body so the user knows
+     interactions won't apply, but keep the UI visible (mobile WS reconnects
+     are constant — blanking everything is jarring). */
+  body.ws-offline #control-section { opacity: 0.55; pointer-events: none; }
+  body.ws-offline .status-bar       { opacity: 1; }
   #screen-tabs {
     display: flex;
     gap: 6px;
@@ -470,6 +475,8 @@ let queuingStream = 'youtube';
 let queuingSize = 70;
 let webcasts = [];         // [{ eventKey, eventName, date, kind, id }]
 
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 renderRecentPins();
@@ -542,6 +549,7 @@ function connect() {
     if (msg.type === 'device_connected') {
       saveRecentPin(pin);
       setStatus('online', `Connected · PIN ${pin}`);
+      document.body.classList.remove('ws-offline');
       document.getElementById('control-section').style.display = 'block';
       document.getElementById('vnc-quick-btn').style.display = '';
       if (msg.outputs) updateOutputs(msg.outputs);
@@ -550,7 +558,7 @@ function connect() {
       if (msg.metrics) updateMetrics(msg.metrics);
     } else if (msg.type === 'device_disconnected') {
       setStatus('offline', `Waiting for device (PIN: ${pin})`);
-      document.getElementById('control-section').style.display = 'none';
+      document.body.classList.add('ws-offline');
       document.getElementById('vnc-quick-btn').style.display = 'none';
     } else if (msg.type === 'ndi_sources') {
       updateNdiSources(msg.sources);
@@ -567,8 +575,11 @@ function connect() {
 
   ws.onclose = () => {
     setStatus('offline', 'Reconnecting…');
-    document.getElementById('control-section').style.display = 'none';
-    reconnectTimer = setTimeout(connect, 3000);
+    // Keep the controls on screen but dimmed/disabled — switching browser
+    // tabs on a phone tears down the WS, and blanking everything every time
+    // is a worse UX than briefly stale UI.
+    document.body.classList.add('ws-offline');
+    reconnectTimer = setTimeout(connect, 800);
   };
 
   ws.onerror = () => toast('WebSocket error');
