@@ -116,6 +116,12 @@ app.get('/captive-portal-api', (_req, res) => {
 });
 
 app.get('/', async (req, res) => {
+  // Provisioning in flight (USB/BLE) -> show the status page regardless of
+  // AP-mode flag. Without this guard we flicker through the home-QR page
+  // mid-flight when applyCredentials sets apMode=false partway through.
+  if (state.provisioningStatus) {
+    return res.send(buildProvisioningStatusPage(state.provisioningStatus));
+  }
   if (state.apMode) {
     // Phone connecting via AP → serve the setup form directly at /
     // (clean URL the captive portal browser was redirected to)
@@ -253,10 +259,9 @@ export async function applyCredentials(
   console.log(`[setup] applying credentials from ${source}: SSID="${ssid}"`);
   state.applyingCredentials = true;
   try {
-    if (state.apIface) {
-      await stopAp(state.apIface).catch(() => {});
-      state.apMode = false;
-    }
+    // connectWifi now goes through frc-handoff which does AP-down + wifi-up
+    // + gateway-verify in a single shell script. No need to stopAp here.
+    state.apMode = false;
 
     const restoreAp = async () => {
       if (!state.apIface) return;
@@ -275,10 +280,11 @@ export async function applyCredentials(
 
     if (onMessage) await onMessage('Checking connection...');
     let result = { online: false, portalUrl: null as string | null };
-    // 8 × 2s = 16s. A healthy network passes the first check; if 16s of polls
-    // all fail, more polling won't help.
-    for (let i = 0; i < 8; i++) {
-      await new Promise(r => setTimeout(r, 2000));
+    // 12 × 1s sleep + 4s curl timeout = up to 60s, but realistic case is
+    // 5-15s (rtl8723be needs a few retries to settle after AP->client).
+    // Failing fast on each curl is much better than 8s timeouts.
+    for (let i = 0; i < 12; i++) {
+      await new Promise(r => setTimeout(r, 1000));
       result = await checkInternet();
       if (result.online || result.portalUrl) break;
     }
@@ -291,15 +297,13 @@ export async function applyCredentials(
       await restoreAp();
       return { kind: 'error', message: 'Connected to WiFi but no internet; check the password or try again.' };
     }
-    // Force the daemon's WS-to-server to reconnect now instead of waiting out
-    // its exponential backoff (which may have grown to 30s during AP mode).
-    // Without this kick the projector flips to "Configure Display" QR but
-    // the server doesn't know the device is back yet, so scanning the QR
-    // shows "device offline" until reconnectDelay elapses.
-    state.reconnectDelay = 1000;
-    if (state.serverWs && state.serverWs.readyState !== WebSocket.OPEN) {
-      try { state.serverWs.terminate(); } catch {}
-    }
+    // Force-tear-down the existing WS and connect a fresh one. terminate()
+    // alone isn't enough -- when the underlying TCP socket is dead (route
+    // gone, peer unreachable), the WS can be stuck in CLOSING state with
+    // its close event never firing, so the existing reconnect loop never
+    // schedules. forceWsReconnect removes listeners, calls terminate, and
+    // calls connectToServer directly to start a fresh connection.
+    state.forceWsReconnect?.();
     // Don't await; runPostConnect can take ~minutes (update + restart).
     runPostConnect();
     return { kind: 'online' };

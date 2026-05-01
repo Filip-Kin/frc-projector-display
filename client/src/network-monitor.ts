@@ -22,24 +22,27 @@ function readCarrier(iface: string): boolean {
 
 function checkOnline(reason: string, listener: RouteListener) {
   exec('ip route show default', (err, stdout) => {
-    const route = stdout.trim();
-    if (err || !route) {
+    const out = (stdout || '').trim();
+    if (err || !out) {
       report(false, `${reason}: no default route`, listener);
       return;
     }
-    // Parse "default via 192.168.1.1 dev enp3s0 onlink"
-    const match = route.match(/dev\s+(\S+)/);
-    const iface = match?.[1];
-    if (!iface) {
-      report(false, `${reason}: route has no iface (${route})`, listener);
+    // There may be multiple default routes (e.g. ethernet + wifi). Skip any
+    // marked `linkdown` or `dead` -- those are stale routes whose interface
+    // lost carrier, and the kernel is configured (via sysctl ignore_routes_
+    // with_linkdown=1) to route around them anyway. Picking the first such
+    // route would falsely report DOWN when wifi is actually fine.
+    const lines = out.split('\n');
+    for (const line of lines) {
+      if (/\b(linkdown|dead)\b/.test(line)) continue;
+      const m = line.match(/dev\s+(\S+)/);
+      const iface = m?.[1];
+      if (!iface) continue;
+      if (!readCarrier(iface)) continue;
+      report(true, `${reason}: route via ${iface} (carrier ok)`, listener);
       return;
     }
-    const carrier = readCarrier(iface);
-    if (!carrier) {
-      report(false, `${reason}: ${iface} carrier down (route exists but no link)`, listener);
-      return;
-    }
-    report(true, `${reason}: route via ${iface} (carrier ok)`, listener);
+    report(false, `${reason}: no live default route (${lines.length} stale)`, listener);
   });
 }
 

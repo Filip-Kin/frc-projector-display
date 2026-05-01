@@ -55,6 +55,21 @@ function pollAudioSinks(attempt = 0) {
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 let ndiPollInterval:   ReturnType<typeof setInterval> | null = null;
 
+// Wire the force-reconnect hook so applyCredentials can drop a stuck WS
+// (CLOSING state with no close event firing) and start fresh.
+state.forceWsReconnect = () => {
+  log('info', '[ws] force reconnect requested');
+  if (state.serverWs) {
+    try { state.serverWs.removeAllListeners(); } catch {}
+    try { state.serverWs.terminate(); } catch {}
+    state.serverWs = null;
+  }
+  if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
+  if (ndiPollInterval)   { clearInterval(ndiPollInterval);   ndiPollInterval   = null; }
+  state.reconnectDelay = 1000;
+  connectToServer();
+};
+
 function connectToServer() {
   const wsUrl = `${SERVER_URL}/ws/device`;
   log('info', `[ws] connecting to ${wsUrl}`);

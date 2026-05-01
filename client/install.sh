@@ -137,15 +137,19 @@ echo "[8] Configuring NetworkManager..."
 systemctl enable NetworkManager 2>/dev/null || true
 systemctl start NetworkManager 2>/dev/null || true
 
-# Tell NM to leave /etc/resolv.conf alone. The AP-mode dnsmasq otherwise
-# clobbers it with `nameserver 127.0.0.1` (or empties it on teardown), which
-# means the device itself can't resolve display.filipkin.com while in AP mode
-# or just after exiting it.
+# Tell NM to leave /etc/resolv.conf alone, and disable NM's internal
+# connectivity check (which probes nmcheck.gnome.org -- frequently blocked
+# by Pi-hole and other ad-blockers, causing nmcli con up to spend 15+s
+# waiting for its own probe to time out before declaring the connection
+# activated).
 mkdir -p /etc/NetworkManager/conf.d
 cat > /etc/NetworkManager/conf.d/no-dns.conf << 'NMDNS'
 [main]
 dns=none
 rc-manager=unmanaged
+
+[connectivity]
+enabled=false
 NMDNS
 
 # Static fallback DNS so the daemon can always reach the control server
@@ -268,20 +272,73 @@ chmod 755 /usr/local/bin/frc-ap-stop
 cat > /usr/local/bin/frc-wifi-connect << 'SCRIPT'
 #!/bin/bash
 # frc-wifi-connect {ssid} {password}
-# Creates a connection profile directly — doesn't require the SSID to be in
-# NM's scan cache (rtl8723be misses networks on first scan post-AP-mode).
+# Heavy logging: every previous failure was hard to diagnose because the
+# script was opaque. Each step is timestamped and prefixed [frc-wifi].
 SSID="$1"; PASS="$2"
+log() { echo "[frc-wifi $(date +%T.%3N)] $*"; }
+
 IFACE=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2=="wifi" {print $1; exit}')
-[ -z "$IFACE" ] && { echo "No wifi interface"; exit 1; }
-nmcli device wifi rescan 2>/dev/null || true
-nmcli con delete "$SSID" 2>/dev/null || true
+[ -z "$IFACE" ] && { log "ERR no wifi interface"; exit 1; }
+log "iface=$IFACE ssid=\"$SSID\" pass_len=${#PASS}"
+
+log "purging stale wifi profiles before adding new one"
+nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' | while read -r N; do
+  log "  deleting profile: $N"
+  nmcli con delete "$N" 2>&1 | sed 's/^/  /'
+done
+
+log "nmcli device wifi rescan"
+nmcli device wifi rescan 2>&1 | sed 's/^/  /' || true
+
 if [ -z "$PASS" ]; then
-  nmcli con add type wifi ifname "$IFACE" con-name "$SSID" ssid "$SSID"
-else
+  log "nmcli con add (open network)"
   nmcli con add type wifi ifname "$IFACE" con-name "$SSID" ssid "$SSID" \
-    wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PASS"
+    802-11-wireless.powersave 2 2>&1 | sed 's/^/  /'
+else
+  log "nmcli con add (WPA-PSK)"
+  nmcli con add type wifi ifname "$IFACE" con-name "$SSID" ssid "$SSID" \
+    wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PASS" \
+    802-11-wireless.powersave 2 2>&1 | sed 's/^/  /'
 fi
-nmcli con up "$SSID"
+
+log "nmcli con up"
+T0=$(date +%s%N)
+nmcli con up "$SSID" 2>&1 | sed 's/^/  /'
+RC=${PIPESTATUS[0]}
+T1=$(date +%s%N)
+log "nmcli con up took $(( (T1-T0)/1000000 ))ms rc=$RC"
+if [ "$RC" -ne 0 ]; then
+  log "post-mortem: link state"
+  ip -br addr show "$IFACE" 2>&1 | sed 's/^/  /'
+  log "post-mortem: nm device status"
+  nmcli -t device show "$IFACE" 2>&1 | grep -E 'GENERAL|IP4|STATE' | sed 's/^/  /'
+  exit "$RC"
+fi
+
+log "post-up state:"
+ip -br addr show "$IFACE" 2>&1 | sed 's/^/  /'
+ip route show dev "$IFACE" 2>&1 | sed 's/^/  /'
+
+# Probe a PUBLIC IP, not the gateway. On rtl8723be the radio can ARP and
+# reply to gateway pings within 1s while still queueing forward-routed
+# packets for 25-35s. We need to wait until externally-routed traffic
+# actually flows, otherwise the daemon's checkInternet to display.filipkin.com
+# fails and the user sees provisioning fail despite a "successful" associate.
+log "probing external connectivity (1.1.1.1)"
+for i in $(seq 1 40); do
+  if ping -I "$IFACE" -c 1 -W 1 1.1.1.1 >/dev/null 2>&1; then
+    log "OK external traffic flowing after ${i}s"
+    exit 0
+  fi
+  log "  probe $i/40 failed"
+  sleep 1
+done
+log "ERR associated but external ping never replied"
+log "final route table:"
+ip route 2>&1 | sed 's/^/  /'
+log "neighbours:"
+ip neigh show dev "$IFACE" 2>&1 | sed 's/^/  /'
+exit 1
 SCRIPT
 chmod 755 /usr/local/bin/frc-wifi-connect
 
@@ -292,6 +349,28 @@ SERVER_URL="\${SERVER_URL:-${SERVER_URL}}"
 curl -fsSL "\${SERVER_URL}/install.sh" | SERVICE_USER="${SERVICE_USER}" INSTALL_DIR="${INSTALL_DIR}" bash
 SCRIPT
 chmod 755 /usr/local/bin/frc-install
+
+cat > /usr/local/bin/frc-handoff << 'SCRIPT'
+#!/bin/bash
+# frc-handoff {ssid} {password}
+# Atomic AP-down + wifi-up + verify. Replaces the daemon's split execFile
+# calls; folding both stages into a single subprocess eliminated wifi
+# reliability issues we could not reproduce manually.
+set -u
+SSID="$1"; PASS="${2:-}"
+IFACE=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2=="wifi" {print $1; exit}')
+[ -z "$IFACE" ] && { echo "[handoff] ERR no wifi interface"; exit 1; }
+log() { echo "[handoff $(date +%T.%3N)] $*"; }
+
+log "iface=$IFACE ssid=\"$SSID\""
+log "stage 1: AP teardown"
+/usr/local/bin/frc-ap-stop "$IFACE" 2>&1 | sed 's/^/  /'
+
+log "stage 2: wifi connect"
+/usr/local/bin/frc-wifi-connect "$SSID" "$PASS"
+exit $?
+SCRIPT
+chmod 755 /usr/local/bin/frc-handoff
 
 cat > /usr/local/bin/frc-usb-mount << 'SCRIPT'
 #!/bin/bash
@@ -342,7 +421,7 @@ chmod 755 /usr/local/bin/frc-eth-dhcp
 # ── Sudoers for WiFi + ethernet helpers ───────────────────────────────────────
 echo "[10] Configuring sudoers..."
 cat > /etc/sudoers.d/frc-display << SUDOCONF
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-handoff, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm
 SUDOCONF
 chmod 440 /etc/sudoers.d/frc-display
 

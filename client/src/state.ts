@@ -26,4 +26,8 @@ export const state = {
   // Set when an out-of-band provisioning attempt (USB or BLE) is in flight, so
   // the projector screen shows feedback instead of looking frozen.
   provisioningStatus: null as null | { source: 'usb' | 'improv'; ssid: string; phase: 'connecting' | 'failed'; message?: string },
+  // Wired up by daemon.ts at startup. Force-tears down the existing serverWs
+  // (which can be stuck in CLOSING state and never fire its close event when
+  // the underlying TCP path is dead) and starts a fresh connection.
+  forceWsReconnect: null as (() => void) | null,
 };

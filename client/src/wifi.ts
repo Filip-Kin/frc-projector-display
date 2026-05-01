@@ -30,9 +30,20 @@ export function stopAp(iface: string): Promise<void> {
 }
 
 export function connectWifi(ssid: string, password: string): Promise<void> {
+  // Use frc-handoff (single shell script that does AP-down + wifi-up + verify
+  // as one subprocess). The same operations done as two separate execFile
+  // calls from TS misbehaved on rtl8723be in ways we couldn't reproduce
+  // manually; folding them into one bash call eliminates whatever subtle
+  // race the split was creating.
   return new Promise((resolve, reject) => {
-    execFile('sudo', ['/usr/local/bin/frc-wifi-connect', ssid, password || ''],
-      { timeout: 30000 }, (err, _o, stderr) => { if (err) { console.error('[wifi]', stderr); reject(err); } else resolve(); });
+    execFile('sudo', ['/usr/local/bin/frc-handoff', ssid, password || ''],
+      { timeout: 60000 }, (err, stdout, stderr) => {
+        const out = (stdout || '').trim(), errOut = (stderr || '').trim();
+        if (out)    console.log(`[handoff]\n${out}`);
+        if (errOut) console.error(`[handoff stderr]\n${errOut}`);
+        if (err) { console.error(`[handoff] failed: ${err.message}`); reject(err); }
+        else resolve();
+      });
   });
 }
 
@@ -65,18 +76,22 @@ export async function scanWifi(): Promise<WifiNetwork[]> {
   });
 }
 
+// Probe our own server instead of connectivitycheck.gstatic.com -- gstatic
+// is on most Pi-hole / ad-blocker blocklists, which we hit at user sites.
+// display.filipkin.com is the host we actually need to reach anyway.
+const PROBE_URL = (process.env.SERVER_URL ?? 'https://display.filipkin.com') + '/version.json';
 export function checkInternet(): Promise<InternetResult> {
   return new Promise((resolve) => {
-    exec('curl -sLI --max-time 8 -w "\\n[exitcode]" http://connectivitycheck.gstatic.com/generate_204 2>&1', (err, stdout) => {
+    exec(`curl -sI --max-time 4 ${JSON.stringify(PROBE_URL)} 2>&1`, (err, stdout) => {
       if (err || !stdout) {
-        console.log(`[net-check] curl exec err=${err?.message ?? '(none)'} stdout="${(stdout ?? '').slice(0, 200)}"`);
+        console.log(`[net-check] fail: ${err?.message?.split('\n')[0] ?? '(empty)'}`);
         resolve({ online: false, portalUrl: null }); return;
       }
       const statuses = [...stdout.matchAll(/HTTP\/\S+\s+(\d+)/g)];
       const last = statuses.length ? parseInt(statuses[statuses.length - 1][1]) : 0;
-      if (last === 204) { resolve({ online: true, portalUrl: null }); return; }
-      // Non-204: log a one-liner so we can see whether it's DNS, TCP, TLS, or a portal
-      console.log(`[net-check] not online: last_status=${last} body_head="${stdout.split('\n')[0].slice(0,120)}"`);
+      // 200 from our server -> we're online. Anything else -> not (yet) online.
+      if (last === 200) { resolve({ online: true, portalUrl: null }); return; }
+      console.log(`[net-check] not online: last_status=${last}`);
       const loc = stdout.match(/[Ll]ocation:\s*(\S+)/);
       resolve({ online: false, portalUrl: loc ? loc[1].trim() : null });
     });
