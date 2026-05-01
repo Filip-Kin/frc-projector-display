@@ -82,17 +82,20 @@ function fetchNexusEvents(): Promise<NexusEvent[]> {
   });
 }
 
-// Drop noise words; what's left is the distinctive part of the event name
-// (e.g. "Johnson"). Used to fuzzy-match Nexus event names against TBA's.
-const NAME_STOPWORDS = new Set([
+// Strip a trailing "(eventKey)" suffix and normalize for matching. Both
+// sides usually return identical names (e.g. "Johnson Division") so an
+// exact compare nails it — token overlap is just a backup.
+function normEventName(s: string): string {
+  return s.replace(/\s*\([^)]*\)\s*$/, '').trim().toLowerCase();
+}
+const TOKEN_STOPWORDS = new Set([
   'championship','first','division','event','district','regional','offseason','frc',
-  'presented','by','the','of','at','on','for','and','&','-',
-  'tournament','competition','open','meet',
+  'presented','by','the','of','at','on','for','and','tournament','competition',
 ]);
 function nameTokens(s: string): Set<string> {
   return new Set(
     s.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/)
-      .filter(w => w && !NAME_STOPWORDS.has(w) && !/^\d+$/.test(w))
+      .filter(w => w && !TOKEN_STOPWORDS.has(w) && !/^\d+$/.test(w))
   );
 }
 
@@ -106,19 +109,34 @@ async function resolveNexusKeyToTba(nexusKey: string): Promise<string | null> {
   ]);
   const nexus = nexusEvents.find(e => e.key === nexusKey);
   if (!nexus) return null;
-  const want = nameTokens(nexus.name);
-  if (!want.size) return null;
+
+  // Primary: exact normalized name match
+  const want = normEventName(nexus.name);
+  if (want) {
+    const hit = tbaEvents.find(e => normEventName(e.name) === want);
+    if (hit) {
+      resolvedTbaKey.set(nexusKey, hit.key);
+      console.log(`[tba] resolved nexus=${nexusKey} -> tba=${hit.key} (exact name)`);
+      return hit.key;
+    }
+  }
+
+  // Fallback: token overlap with stopwords stripped
+  const wantTok = nameTokens(nexus.name);
   let best = { key: '', score: 0 };
   for (const e of tbaEvents) {
-    const have = nameTokens(e.name);
+    const haveTok = nameTokens(e.name);
     let score = 0;
-    for (const t of want) if (have.has(t)) score++;
+    for (const t of wantTok) if (haveTok.has(t)) score++;
     if (score > best.score) best = { key: e.key, score };
   }
-  if (!best.key) return null;
-  resolvedTbaKey.set(nexusKey, best.key);
-  console.log(`[tba] resolved nexus=${nexusKey} -> tba=${best.key} (score=${best.score})`);
-  return best.key;
+  if (best.key) {
+    resolvedTbaKey.set(nexusKey, best.key);
+    console.log(`[tba] resolved nexus=${nexusKey} -> tba=${best.key} (token overlap=${best.score})`);
+    return best.key;
+  }
+  console.log(`[tba] could not resolve nexus=${nexusKey} (name=${JSON.stringify(nexus.name)})`);
+  return null;
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -190,9 +208,12 @@ export function registerRoutes(app: Application) {
 
     try {
       let r = await tbaGet(`/event/${encodeURIComponent(key)}/rankings`);
-      if (r.status === 404) {
+      // TBA returns HTTP 200 with body 'null' (not 404) when the rankings
+      // endpoint doesn't recognize the event key, so we fall back on either.
+      const looksUnknown = r.status === 404 || (r.status === 200 && r.body.trim() === 'null');
+      if (looksUnknown) {
         const tbaKey = await resolveNexusKeyToTba(key).catch(() => null);
-        if (tbaKey) r = await tbaGet(`/event/${encodeURIComponent(tbaKey)}/rankings`);
+        if (tbaKey && tbaKey !== key) r = await tbaGet(`/event/${encodeURIComponent(tbaKey)}/rankings`);
       }
       rankingsCache.set(key, { ts: Date.now(), body: r.body, status: r.status });
       res.status(r.status).type('application/json').send(r.body);

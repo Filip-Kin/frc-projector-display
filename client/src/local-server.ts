@@ -147,8 +147,9 @@ app.get('/youtube', (req, res) => {
   const v = String(req.query.v ?? '').trim();
   const ch = String(req.query.channel ?? '').trim();
   let src = '';
-  if (ch) src = `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(ch)}&autoplay=1`;
-  else if (v) src = `https://www.youtube.com/embed/${encodeURIComponent(v)}?autoplay=1&rel=0`;
+  // &start=99999 seeks past any VOD content, effectively jumping to live edge.
+  if (ch) src = `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(ch)}&autoplay=1&start=99999`;
+  else if (v) src = `https://www.youtube.com/embed/${encodeURIComponent(v)}?autoplay=1&rel=0&start=99999`;
   if (!src) { res.status(400).send('missing v or channel'); return; }
   res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>*{margin:0;padding:0;box-sizing:border-box}html,body{width:100%;height:100%;background:#000;overflow:hidden}iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}</style></head><body><iframe src="${src}" allow="autoplay;fullscreen" allowfullscreen></iframe></body></html>`);
 });
