@@ -124,17 +124,24 @@
   .rankings-list { overflow: hidden; flex: 1; min-height: 0;
     transition: opacity 400ms ease; }
   .rankings-list.fade { opacity: 0; }
-  .rankings-list.sidebar { column-count: 1; column-gap: 0; }
-  .rankings-list.bottom  { column-width: 130px; column-gap: 12px; }
+  .rankings-list.sidebar { display: flex; flex-direction: column; gap: 0; }
+  /* Bottom layout uses CSS Grid so we get deterministic column count + dense
+     column-first flow. Pages are sized per render to a multiple of the
+     column count, avoiding the ragged short-last-column look. */
+  .rankings-list.bottom {
+    display: grid;
+    grid-auto-flow: column;
+    column-gap: 14px;
+    row-gap: 4px;
+    align-content: start;
+  }
   .rank-row {
     display: flex; align-items: baseline; gap: 8px; padding: 4px 8px;
     border-radius: 4px;
-    /* Box must be the full column width — without this the auto-margin RP
-       trick pushes RP only to the end of the row's intrinsic content, not
-       to the column edge. */
+    /* Each row spans its grid track / flex line; without width:100% the
+       auto-margin RP only reaches the row's intrinsic content edge. */
     width: 100%;
-    /* break-inside avoid: never split a row mid-column */
-    break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
+    box-sizing: border-box;
   }
   .rank-row .rank { width: 1.8em; color: #888; font-variant-numeric: tabular-nums;
     font-weight: 700; text-align: right; flex-shrink: 0; }
@@ -218,11 +225,13 @@ const streamEl = document.getElementById('stream');
 let currentEmbedSrc = '';
 
 function buildYoutubeEmbed(spec) {
-  // spec: 'channel:UCxxx' OR a bare videoId
+  // No start=99999: it's an out-of-bounds seek for VOD content (today's
+  // webcast can be a recorded archive, not just a livestream), which the
+  // player rejects with error 153. Live streams default to live edge anyway.
   if (spec.startsWith('channel:')) {
-    return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.slice(8))}&autoplay=1&mute=1&start=99999`;
+    return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.slice(8))}&autoplay=1&mute=1`;
   }
-  return `https://www.youtube.com/embed/${encodeURIComponent(spec)}?autoplay=1&rel=0&mute=1&start=99999`;
+  return `https://www.youtube.com/embed/${encodeURIComponent(spec)}?autoplay=1&rel=0&mute=1`;
 }
 
 function setStreamEmbed(src) {
@@ -410,7 +419,11 @@ async function fetchRankings() {
 // don't share an index when both happen to be enabled.
 const rankingsPageIdx = { sidebar: 0, bottom: 0 };
 const SIDEBAR_PAGE_SIZE = 22;
-const BOTTOM_PAGE_SIZE  = 50;
+// Bottom rankings: 5 columns × 8 rows = 40 per page. 75-team divisions
+// page as 40 + 35 (both fully populated 5-wide grids).
+const BOTTOM_COLS       = 5;
+const BOTTOM_ROWS_MAX   = 8;
+const BOTTOM_PAGE_SIZE  = BOTTOM_COLS * BOTTOM_ROWS_MAX;
 const RANKINGS_CYCLE_MS = 8000;
 
 function rankRowHtml(r) {
@@ -428,8 +441,7 @@ function rankRowHtml(r) {
 
 function widgetRankings(el, placement) {
   const variant = placement === 'bottom' ? 'bottom' : 'sidebar';
-  const pageSize = variant === 'sidebar' ? SIDEBAR_PAGE_SIZE : BOTTOM_PAGE_SIZE;
-  let body, titleSuffix = '';
+  let body, titleSuffix = '', extraStyle = '';
 
   if (rankingsState.error) {
     body = `<div class="empty">Rankings unavailable: ${esc(rankingsState.error)}</div>`;
@@ -439,17 +451,35 @@ function widgetRankings(el, placement) {
     body = '<div class="empty">No rankings yet</div>';
   } else {
     const rows = rankingsState.rows;
-    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
-    const idxRef = variant === 'sidebar' ? 'sidebar' : 'bottom';
-    if (rankingsPageIdx[idxRef] >= totalPages) rankingsPageIdx[idxRef] = 0;
-    const page = rankingsPageIdx[idxRef];
-    const slice = rows.slice(page * pageSize, (page + 1) * pageSize);
-    body = slice.map(rankRowHtml).join('');
-    if (totalPages > 1) titleSuffix = `<span class="rankings-page-indicator">page ${page + 1}/${totalPages}</span>`;
+
+    if (variant === 'sidebar') {
+      const totalPages = Math.max(1, Math.ceil(rows.length / SIDEBAR_PAGE_SIZE));
+      if (rankingsPageIdx.sidebar >= totalPages) rankingsPageIdx.sidebar = 0;
+      const page = rankingsPageIdx.sidebar;
+      const slice = rows.slice(page * SIDEBAR_PAGE_SIZE, (page + 1) * SIDEBAR_PAGE_SIZE);
+      body = slice.map(rankRowHtml).join('');
+      if (totalPages > 1) titleSuffix = `<span class="rankings-page-indicator">page ${page + 1}/${totalPages}</span>`;
+    } else {
+      // Pick page size that splits evenly into BOTTOM_COLS so each page
+      // renders as a full grid (no orphan column with 2 entries while the
+      // rest have 6). Pick the smallest pages × cols × rows >= total.
+      const totalPages = Math.max(1, Math.ceil(rows.length / BOTTOM_PAGE_SIZE));
+      const rowsPerCol = Math.min(BOTTOM_ROWS_MAX, Math.ceil(rows.length / (totalPages * BOTTOM_COLS)));
+      const perPage = rowsPerCol * BOTTOM_COLS;
+      if (rankingsPageIdx.bottom >= totalPages) rankingsPageIdx.bottom = 0;
+      const page = rankingsPageIdx.bottom;
+      const slice = rows.slice(page * perPage, (page + 1) * perPage);
+      body = slice.map(rankRowHtml).join('');
+      // Explicit grid-template-rows so column-first flow knows how tall each
+      // column is (otherwise auto-flow column would put everything in 1 col).
+      const colsThisPage = Math.min(BOTTOM_COLS, Math.ceil(slice.length / rowsPerCol));
+      extraStyle = `style="grid-template-rows: repeat(${rowsPerCol}, auto); grid-template-columns: repeat(${colsThisPage}, 1fr);"`;
+      if (totalPages > 1) titleSuffix = `<span class="rankings-page-indicator">page ${page + 1}/${totalPages}</span>`;
+    }
   }
 
   el.innerHTML = `<div class="col-title">Rankings${titleSuffix}</div>
-    <div class="rankings-list ${variant}">${body}</div>`;
+    <div class="rankings-list ${variant}" ${extraStyle}>${body}</div>`;
 }
 
 // Cycle pages every 8s with a fade. Bottom and sidebar each track their own
@@ -475,7 +505,9 @@ function maybeStartRankingsCycle() {
       }
     };
     if (sidebarOn) flipPage('sidebar', SIDEBAR_PAGE_SIZE, sidebarEl);
-    if (bottomOn)  flipPage('bottom',  BOTTOM_PAGE_SIZE,  bottomEl);
+    // For bottom we paginate at the natural bottom page size (5 cols ×
+    // BOTTOM_ROWS_MAX rows); pages use evenly-distributed perPage internally.
+    if (bottomOn)  flipPage('bottom',  BOTTOM_PAGE_SIZE, bottomEl);
   }, RANKINGS_CYCLE_MS);
 }
 

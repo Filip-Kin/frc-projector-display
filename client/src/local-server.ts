@@ -141,52 +141,59 @@ app.get('/', async (req, res) => {
   res.send(buildQrPage(qr));
 });
 
-app.get('/youtube', (req, res) => {
+app.get('/youtube', async (req, res) => {
   // Accepts ?v=<videoId> | ?channel=<channelId> | ?event=<eventKey>.
-  // event= variant resolves to today's-or-latest webcast via the upstream
-  // server's /api/webcast-for/:eventKey, and re-resolves hourly so a day
-  // rollover swaps streams without operator intervention.
+  // event= resolves server-side to today's-or-latest webcast and rebuilds
+  // the page hourly so a day rollover swaps streams. mute=1 is mandatory:
+  // YouTube refuses unmuted autoplay regardless of Chromium's autoplay
+  // policy on some configs (notably Bay Trail second output) and you get
+  // a black frame instead of the stream.
   const v  = String(req.query.v ?? '').trim();
   const ch = String(req.query.channel ?? '').trim();
   const ev = String(req.query.event ?? '').trim();
   const apiBase = (process.env.SERVER_URL ?? 'https://display.filipkin.com').replace(/\/$/, '');
-  let initialSrc = '';
-  if (ch) initialSrc = `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(ch)}&autoplay=1&start=99999`;
-  else if (v) initialSrc = `https://www.youtube.com/embed/${encodeURIComponent(v)}?autoplay=1&rel=0&start=99999`;
-  else if (!ev) { res.status(400).send('missing v, channel, or event'); return; }
 
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+  function buildSrc(spec: { kind: 'video' | 'channel'; id: string }) {
+    // No &start=99999: YouTube live embeds default to live edge anyway, and
+    // VOD content (today's webcast = a recorded video) errors 153 if seeked
+    // out of bounds. Plain autoplay+mute is enough.
+    if (spec.kind === 'channel') return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.id)}&autoplay=1&mute=1`;
+    return `https://www.youtube.com/embed/${encodeURIComponent(spec.id)}?autoplay=1&mute=1&rel=0`;
+  }
+
+  let src = '';
+  if (ch) src = buildSrc({ kind: 'channel', id: ch });
+  else if (v) src = buildSrc({ kind: 'video', id: v });
+  else if (ev) {
+    // Server-side resolve so the iframe loads with a real URL on first paint.
+    // Avoids the empty-src then JS-sets-src dance that some chromium configs
+    // render as a permanent black frame.
+    try {
+      const upstream = await new Promise<string>((resolve) => {
+        const h = require('https');
+        h.get(`${apiBase}/api/webcast-for/${encodeURIComponent(ev)}`, { timeout: 5000 },
+          (r: any) => { let d = ''; r.on('data', (c: any) => d += c); r.on('end', () => resolve(d)); })
+          .on('error', () => resolve(''))
+          .on('timeout', () => resolve(''));
+      });
+      const w = upstream ? JSON.parse(upstream) : null;
+      if (w?.id) src = buildSrc({ kind: w.kind === 'channel' ? 'channel' : 'video', id: w.id });
+    } catch {}
+  }
+  if (!src) { res.status(404).send('no stream available'); return; }
+
+  // The page reloads itself hourly so an event:KEY-resolved page picks up a
+  // new day's webcast without intervention. Cheap (one HTTP request to the
+  // local daemon) and reliable (full page nav, not iframe.src swap).
+  const reloadJs = ev ? `<script>setTimeout(() => location.reload(), 60 * 60 * 1000);</script>` : '';
+  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;background:#000;overflow:hidden}
 iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}
 </style></head><body>
-<iframe id="yt" src="${initialSrc}" allow="autoplay;fullscreen" allowfullscreen></iframe>
-${ev ? `<script>
-const eventKey = ${JSON.stringify(ev)};
-const apiBase  = ${JSON.stringify(apiBase)};
-let currentSrc = '';
-function buildSrc(w) {
-  if (w.kind === 'channel') return 'https://www.youtube.com/embed/live_stream?channel=' + encodeURIComponent(w.id) + '&autoplay=1&start=99999';
-  return 'https://www.youtube.com/embed/' + encodeURIComponent(w.id) + '?autoplay=1&rel=0&start=99999';
-}
-async function refresh() {
-  try {
-    const r = await fetch(apiBase + '/api/webcast-for/' + encodeURIComponent(eventKey), { cache: 'no-store' });
-    if (!r.ok) return;
-    const w = await r.json();
-    if (!w?.id) return;
-    const src = buildSrc(w);
-    if (src !== currentSrc) {
-      currentSrc = src;
-      document.getElementById('yt').src = src;
-    }
-  } catch {}
-}
-refresh();
-setInterval(refresh, 60 * 60 * 1000);
-</script>` : ''}
-</body></html>`;
-  res.send(html);
+<iframe src="${src}" allow="autoplay;fullscreen" allowfullscreen></iframe>
+${reloadJs}
+</body></html>`);
 });
 
 app.get('/connecting', (_req, res) => res.send(buildConnectingPage()));
