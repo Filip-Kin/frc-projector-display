@@ -161,11 +161,14 @@
   .rankings-list.sidebar .rank-row .team { font-size: 1.05em; }
   .rankings-list.sidebar .rank-row .rp   { font-size: 0.7em; min-width: 4em; color: #4af; }
   .rankings-list.sidebar .rank-row:nth-child(even) { background: #141414; }
-  /* Bottom: smaller font + multicolumn fits ~5 columns x 6 rows for ~30 teams */
+  /* Bottom: row size is governed by the grid (minmax(0, 1fr)); we just
+     style the visuals here. overflow:hidden ensures any content too tall
+     for a squished row gets clipped instead of pushing siblings down. */
   .rankings-list.bottom .rank-row {
-    background: #141414; margin-bottom: 3px;
-    font-size: clamp(0.9rem, 1.6vh, 1.3rem);
-    padding: 4px 10px;
+    background: #141414; margin-bottom: 0;
+    font-size: clamp(0.85rem, 1.5vh, 1.25rem);
+    padding: 2px 10px;
+    overflow: hidden;
   }
   .rankings-list.bottom .rank-row .team { font-size: 1.1em; }
   .rankings-list.bottom .rank-row .rp   { font-size: 0.78em; }
@@ -513,8 +516,11 @@ function widgetRankings(el, placement) {
       body = slice.map(rankRowHtml).join('');
       // Explicit grid-template-rows so column-first flow knows how tall each
       // column is (otherwise auto-flow column would put everything in 1 col).
+      // minmax(0, 1fr) so rows distribute evenly within whatever vertical
+      // space the bottom strip has — important since #bottom now has a
+      // padding-bottom for the fixed clock; auto-sized rows would overflow.
       const colsThisPage = Math.min(BOTTOM_COLS, Math.ceil(slice.length / rowsPerCol));
-      extraStyle = `style="grid-template-rows: repeat(${rowsPerCol}, auto); grid-template-columns: repeat(${colsThisPage}, 1fr);"`;
+      extraStyle = `style="grid-template-rows: repeat(${rowsPerCol}, minmax(0, 1fr)); grid-template-columns: repeat(${colsThisPage}, 1fr);"`;
       if (totalPages > 1) titleSuffix = `<span class="rankings-page-indicator">page ${page + 1}/${totalPages}</span>`;
     }
   }
