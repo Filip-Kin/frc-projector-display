@@ -725,10 +725,10 @@ function applyMode() {
     case 'youtube': {
       const sel = normalizeStreamSource(document.getElementById('youtube-webcast-select').value);
       let url;
-      if (sel.startsWith('channel:')) {
+      if (sel.startsWith('event:')) {
+        url = `http://localhost:3000/youtube?event=${encodeURIComponent(sel.slice(6))}`;
+      } else if (sel.startsWith('channel:')) {
         url = `http://localhost:3000/youtube?channel=${encodeURIComponent(sel.slice(8))}`;
-      } else if (sel) {
-        url = `http://localhost:3000/youtube?v=${encodeURIComponent(sel)}`;
       } else {
         const val = document.getElementById('youtube-id').value.trim();
         if (!val) { toast('Enter YouTube URL or ID'); return; }
@@ -837,14 +837,16 @@ async function loadWebcasts() {
 }
 
 function populateWebcastDropdowns() {
+  // /api/webcasts now returns one entry per event (already resolved to
+  // today's-or-latest webcast). Saving 'event:<key>' lets the daemon and
+  // queuing page re-resolve daily without operator intervention.
   const today = new Date().toISOString().slice(0, 10);
   const opts = ['<option value="">— Custom (enter URL/ID below) —</option>'];
   for (const w of webcasts) {
-    const dateLabel = w.date === today ? 'TODAY' : (w.date || '');
-    const datePart = dateLabel ? `[${dateLabel}] ` : '';
-    const kindPart = w.kind === 'channel' ? ' · live' : '';
-    const val = `${w.kind}:${w.id}`;
-    const label = `${datePart}${esc(w.eventName)}${kindPart}`;
+    const todayMark = w.date === today ? '' : ' (latest)';
+    const kindPart  = w.kind === 'channel' ? ' · live' : '';
+    const val   = `event:${w.eventKey}`;
+    const label = `${esc(w.eventName)}${todayMark}${kindPart}`;
     opts.push(`<option value="${val}">${label}</option>`);
   }
   for (const id of ['youtube-webcast-select', 'queuing-webcast-select']) {
@@ -860,14 +862,12 @@ function onYoutubeWebcastChange(prefix) {
   if (sel && custom) custom.style.display = sel.value ? 'none' : '';
 }
 
-// streamSource is either '<videoId>' (old) or 'channel:<channelId>' (new).
-// The webcast dropdown emits 'video:<id>' or 'channel:<id>'; collapse video:
-// down to a bare ID so the daemon-side /youtube handler keeps working.
-function normalizeStreamSource(v) {
-  if (!v) return '';
-  if (v.startsWith('video:')) return v.slice(6);
-  return v;
-}
+// streamSource forms:
+//   '<videoId>'             — bare 11-char YouTube video ID (legacy / custom)
+//   'channel:<channelId>'   — YouTube live-stream by channel
+//   'event:<eventKey>'      — re-resolves to today's-or-latest webcast on each
+//                             render (queuing.html / daemon /youtube handle this)
+function normalizeStreamSource(v) { return v ?? ''; }
 
 async function loadNexusEvents() {
   try {

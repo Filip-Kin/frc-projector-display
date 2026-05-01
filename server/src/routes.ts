@@ -229,51 +229,60 @@ export function registerRoutes(app: Application) {
     }
   });
 
-  // Aggregated youtube webcasts across currently-active Nexus events.
-  // Drives the "Stream" dropdown on /control. Cached on top of the event/
-  // events caches above, so this is cheap to call frequently.
+  // Per-event, day-aware webcast pick. Returns today's webcast for the
+  // event if one exists, else the most recent. queuing.html and the
+  // daemon's /youtube page resolve event:<key> through this so they can
+  // pick up a new day's stream automatically without a config change.
+  async function pickWebcastForEvent(eventKey: string): Promise<{
+    eventKey: string; eventName?: string; date: string | null;
+    kind: 'video' | 'channel'; id: string;
+  } | null> {
+    let tbaEv = await fetchTbaEvent(eventKey).catch(() => null);
+    if (!tbaEv) {
+      const resolved = await resolveNexusKeyToTba(eventKey).catch(() => null);
+      if (resolved) tbaEv = await fetchTbaEvent(resolved).catch(() => null);
+    }
+    if (!tbaEv?.webcasts?.length) return null;
+    const yts = tbaEv.webcasts.filter((w: any) => w.type === 'youtube' && w.channel);
+    if (!yts.length) return null;
+    const today = new Date().toISOString().slice(0, 10);
+    const todayHit = yts.find((w: any) => w.date === today);
+    const pick = todayHit ?? [...yts].sort((a: any, b: any) =>
+      (b.date || '').localeCompare(a.date || ''))[0];
+    const isVideo = /^[A-Za-z0-9_-]{11}$/.test(pick.channel);
+    return {
+      eventKey, eventName: tbaEv.name,
+      date: pick.date || null,
+      kind: isVideo ? 'video' : 'channel',
+      id: pick.channel,
+    };
+  }
+
+  app.get('/api/webcast-for/:eventKey', async (req, res) => {
+    const key = req.params.eventKey;
+    if (!/^[a-z0-9]+$/i.test(key)) { res.status(400).json({ error: 'bad event key' }); return; }
+    try {
+      const w = await pickWebcastForEvent(key);
+      if (!w) { res.status(404).json({ error: 'no webcast for event' }); return; }
+      res.json(w);
+    } catch (err: any) {
+      res.status(502).json({ error: err.message });
+    }
+  });
+
+  // Drives the dropdown on /control. One row per event with an active webcast,
+  // already resolved to today's-or-latest. Frontend just stores `event:<key>`
+  // as the streamSource and re-resolves at render time, so day rollovers and
+  // stream URL changes flow through without any operator action.
   app.get('/api/webcasts', async (_req, res) => {
     const events = await fetchNexusEvents();
     const out: any[] = [];
     for (const ev of events) {
-      let tbaEv = await fetchTbaEvent(ev.key).catch(() => null);
-      let usedKey = ev.key;
-      if (!tbaEv) {
-        const resolved = await resolveNexusKeyToTba(ev.key).catch(() => null);
-        if (resolved) {
-          tbaEv = await fetchTbaEvent(resolved).catch(() => null);
-          usedKey = resolved;
-        }
-      }
-      if (!tbaEv?.webcasts) {
-        console.log(`[webcasts] skip ${ev.key} (no tba match)`);
-        continue;
-      }
-      const ytCount = tbaEv.webcasts.filter((w: any) => w.type === 'youtube' && w.channel).length;
-      console.log(`[webcasts] ${ev.key}->${usedKey}: ${ytCount} youtube webcast(s)`);
-      for (const w of tbaEv.webcasts) {
-        if (w.type !== 'youtube' || !w.channel) continue;
-        // YouTube IDs are 11 chars [A-Za-z0-9_-]; channel IDs are longer
-        // (usually 24 chars, prefix UC). The "channel" field in TBA holds
-        // either, depending on how the event registered the webcast.
-        const isVideo = /^[A-Za-z0-9_-]{11}$/.test(w.channel);
-        out.push({
-          eventKey: ev.key,
-          eventName: ev.name,
-          date: w.date || null,
-          kind: isVideo ? 'video' : 'channel',
-          id: w.channel,
-        });
-      }
+      const w = await pickWebcastForEvent(ev.key).catch(() => null);
+      if (!w) { console.log(`[webcasts] skip ${ev.key} (no tba match or no youtube)`); continue; }
+      out.push({ ...w, eventName: ev.name });
+      console.log(`[webcasts] ${ev.key}: today's-or-latest = ${w.date} ${w.kind}:${w.id}`);
     }
-    // Today first, then by date ascending; ties keep array order
-    const today = new Date().toISOString().slice(0, 10);
-    out.sort((a, b) => {
-      const aT = a.date === today ? 0 : 1;
-      const bT = b.date === today ? 0 : 1;
-      if (aT !== bT) return aT - bT;
-      return (a.date || '').localeCompare(b.date || '');
-    });
     res.json(out);
   });
 

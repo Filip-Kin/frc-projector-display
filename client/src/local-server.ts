@@ -142,16 +142,51 @@ app.get('/', async (req, res) => {
 });
 
 app.get('/youtube', (req, res) => {
-  // Accepts ?v=<videoId> (specific video) or ?channel=<channelId> (live stream
-  // on a YouTube channel — used by webcast picker for FRC events).
-  const v = String(req.query.v ?? '').trim();
+  // Accepts ?v=<videoId> | ?channel=<channelId> | ?event=<eventKey>.
+  // event= variant resolves to today's-or-latest webcast via the upstream
+  // server's /api/webcast-for/:eventKey, and re-resolves hourly so a day
+  // rollover swaps streams without operator intervention.
+  const v  = String(req.query.v ?? '').trim();
   const ch = String(req.query.channel ?? '').trim();
-  let src = '';
-  // &start=99999 seeks past any VOD content, effectively jumping to live edge.
-  if (ch) src = `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(ch)}&autoplay=1&start=99999`;
-  else if (v) src = `https://www.youtube.com/embed/${encodeURIComponent(v)}?autoplay=1&rel=0&start=99999`;
-  if (!src) { res.status(400).send('missing v or channel'); return; }
-  res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><style>*{margin:0;padding:0;box-sizing:border-box}html,body{width:100%;height:100%;background:#000;overflow:hidden}iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}</style></head><body><iframe src="${src}" allow="autoplay;fullscreen" allowfullscreen></iframe></body></html>`);
+  const ev = String(req.query.event ?? '').trim();
+  const apiBase = (process.env.SERVER_URL ?? 'https://display.filipkin.com').replace(/\/$/, '');
+  let initialSrc = '';
+  if (ch) initialSrc = `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(ch)}&autoplay=1&start=99999`;
+  else if (v) initialSrc = `https://www.youtube.com/embed/${encodeURIComponent(v)}?autoplay=1&rel=0&start=99999`;
+  else if (!ev) { res.status(400).send('missing v, channel, or event'); return; }
+
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#000;overflow:hidden}
+iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}
+</style></head><body>
+<iframe id="yt" src="${initialSrc}" allow="autoplay;fullscreen" allowfullscreen></iframe>
+${ev ? `<script>
+const eventKey = ${JSON.stringify(ev)};
+const apiBase  = ${JSON.stringify(apiBase)};
+let currentSrc = '';
+function buildSrc(w) {
+  if (w.kind === 'channel') return 'https://www.youtube.com/embed/live_stream?channel=' + encodeURIComponent(w.id) + '&autoplay=1&start=99999';
+  return 'https://www.youtube.com/embed/' + encodeURIComponent(w.id) + '?autoplay=1&rel=0&start=99999';
+}
+async function refresh() {
+  try {
+    const r = await fetch(apiBase + '/api/webcast-for/' + encodeURIComponent(eventKey), { cache: 'no-store' });
+    if (!r.ok) return;
+    const w = await r.json();
+    if (!w?.id) return;
+    const src = buildSrc(w);
+    if (src !== currentSrc) {
+      currentSrc = src;
+      document.getElementById('yt').src = src;
+    }
+  } catch {}
+}
+refresh();
+setInterval(refresh, 60 * 60 * 1000);
+</script>` : ''}
+</body></html>`;
+  res.send(html);
 });
 
 app.get('/connecting', (_req, res) => res.send(buildConnectingPage()));

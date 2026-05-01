@@ -127,21 +127,34 @@
   .rankings-list.sidebar { column-count: 1; column-gap: 0; }
   .rankings-list.bottom  { column-width: 130px; column-gap: 12px; }
   .rank-row {
-    display: flex; align-items: baseline; gap: 8px; padding: 4px 6px;
+    display: flex; align-items: baseline; gap: 8px; padding: 4px 8px;
     border-radius: 4px;
-    font-size: clamp(0.95rem, 1.7vh, 1.5rem);
     /* break-inside avoid: never split a row mid-column */
     break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
   }
-  .rank-row .rank { width: 2em; color: #888; font-variant-numeric: tabular-nums;
-    font-weight: 700; text-align: right; font-size: 0.85em; flex-shrink: 0; }
+  .rank-row .rank { width: 1.8em; color: #888; font-variant-numeric: tabular-nums;
+    font-weight: 700; text-align: right; flex-shrink: 0; }
   .rank-row .rank.top3 { color: #fa0; }
-  .rank-row .team { color: #fff; font-weight: 800; font-variant-numeric: tabular-nums;
-    font-size: 1.2em; flex: 1; }
-  .rank-row .rp { color: #6cf; font-size: 0.78em; font-weight: 700;
-    font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .rank-row .team { color: #fff; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .rank-row .rp { margin-left: auto; min-width: 3.4em; text-align: right;
+    color: #6cf; font-weight: 700; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  /* Sidebar: every row tall enough that 22 rows fill the column. Fonts scale
+     up so a single team number is the dominant visual element. */
+  .rankings-list.sidebar .rank-row {
+    font-size: clamp(1.1rem, calc((var(--stream-pct) * 1vh) / 24), 2.2rem);
+    padding: 2px 8px;
+  }
+  .rankings-list.sidebar .rank-row .team { font-size: 1.05em; }
+  .rankings-list.sidebar .rank-row .rp   { font-size: 0.7em; min-width: 4em; color: #4af; }
   .rankings-list.sidebar .rank-row:nth-child(even) { background: #141414; }
-  .rankings-list.bottom  .rank-row { background: #141414; margin-bottom: 3px; }
+  /* Bottom: smaller font + multicolumn fits ~5 columns x 6 rows for ~30 teams */
+  .rankings-list.bottom .rank-row {
+    background: #141414; margin-bottom: 3px;
+    font-size: clamp(0.9rem, 1.6vh, 1.3rem);
+    padding: 4px 10px;
+  }
+  .rankings-list.bottom .rank-row .team { font-size: 1.1em; }
+  .rankings-list.bottom .rank-row .rp   { font-size: 0.78em; }
   .rankings-page-indicator { font-size: 0.7rem; color: #555; font-weight: 500;
     letter-spacing: 0.05em; margin-left: 8px; }
 
@@ -171,8 +184,9 @@
   .empty { color: #444; font-size: 0.9rem; font-style: italic; padding: 14px 0; }
 
   /* ── Status footer ── */
-  #status { position: fixed; bottom: 4px; right: 8px; font-size: 0.7rem; color: #333;
-    pointer-events: none; }
+  #status { position: fixed; bottom: 6px; right: 12px; font-size: 1.1rem; color: #888;
+    font-variant-numeric: tabular-nums; pointer-events: none;
+    text-shadow: 0 1px 2px #000a; }
   #status.error { color: #f66; }
 </style>
 </head>
@@ -198,18 +212,54 @@ if (sizePct === 60) document.body.classList.add('size-60');
 // ── Stream area ──────────────────────────────────────────────────────────────
 
 const streamEl = document.getElementById('stream');
-function buildYoutubeEmbed(src) {
-  if (src.startsWith('channel:')) {
-    return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(src.slice(8))}&autoplay=1&mute=1&start=99999`;
+let currentEmbedSrc = '';
+
+function buildYoutubeEmbed(spec) {
+  // spec: 'channel:UCxxx' OR a bare videoId
+  if (spec.startsWith('channel:')) {
+    return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(spec.slice(8))}&autoplay=1&mute=1&start=99999`;
   }
-  return `https://www.youtube.com/embed/${encodeURIComponent(src)}?autoplay=1&rel=0&mute=1&start=99999`;
+  return `https://www.youtube.com/embed/${encodeURIComponent(spec)}?autoplay=1&rel=0&mute=1&start=99999`;
 }
-if (streamType === 'youtube' && streamId) {
+
+function setStreamEmbed(src) {
+  if (src === currentEmbedSrc) return;
+  currentEmbedSrc = src;
+  streamEl.innerHTML = '';
   const yt = document.createElement('iframe');
-  yt.src = buildYoutubeEmbed(streamId);
+  yt.src = src;
   yt.allow = 'autoplay;fullscreen';
   yt.allowFullscreen = true;
   streamEl.appendChild(yt);
+}
+
+async function resolveEventWebcast(eventKey) {
+  // Returns the per-spec form ('channel:...' or bare videoId) or null.
+  try {
+    const r = await fetch(`/api/webcast-for/${encodeURIComponent(eventKey)}`, { cache: 'no-store' });
+    if (!r.ok) return null;
+    const w = await r.json();
+    if (!w?.id) return null;
+    return w.kind === 'channel' ? `channel:${w.id}` : w.id;
+  } catch { return null; }
+}
+
+async function refreshStream() {
+  if (streamType !== 'youtube' || !streamId) return;
+  if (streamId.startsWith('event:')) {
+    const spec = await resolveEventWebcast(streamId.slice(6));
+    if (spec) setStreamEmbed(buildYoutubeEmbed(spec));
+    else if (!currentEmbedSrc) streamEl.innerHTML = '<div class="ndi-placeholder">No webcast</div>';
+  } else {
+    setStreamEmbed(buildYoutubeEmbed(streamId));
+  }
+}
+
+if (streamType === 'youtube' && streamId) {
+  refreshStream();
+  // Re-resolve every hour so day rollovers swap in the new day's webcast
+  // automatically without having to reconfigure or reboot.
+  setInterval(refreshStream, 60 * 60 * 1000);
 } else if (streamType === 'ndi') {
   streamEl.innerHTML = '<div class="ndi-placeholder">NDI</div>';
 } else {
