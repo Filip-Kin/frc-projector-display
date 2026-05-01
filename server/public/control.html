@@ -359,8 +359,14 @@
 
   <!-- YouTube config -->
   <div class="mode-config" id="config-youtube">
-    <label>YouTube URL or Video ID</label>
-    <input type="text" id="youtube-id" placeholder="https://youtube.com/watch?v=... or video ID">
+    <label>Stream</label>
+    <select id="youtube-webcast-select" onchange="onYoutubeWebcastChange('youtube')">
+      <option value="">— Custom (enter URL/ID below) —</option>
+    </select>
+    <div id="youtube-custom-fields">
+      <label>YouTube URL or Video ID</label>
+      <input type="text" id="youtube-id" placeholder="https://youtube.com/watch?v=... or video ID">
+    </div>
     <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
   </div>
 
@@ -386,8 +392,14 @@
     </div>
 
     <div id="qs-youtube-fields">
-      <label>YouTube URL or Video ID</label>
-      <input type="text" id="queuing-youtube-id" placeholder="https://youtube.com/watch?v=... or video ID">
+      <label>Stream</label>
+      <select id="queuing-webcast-select" onchange="onYoutubeWebcastChange('queuing')">
+        <option value="">— Custom (enter URL/ID below) —</option>
+      </select>
+      <div id="queuing-custom-fields">
+        <label>YouTube URL or Video ID</label>
+        <input type="text" id="queuing-youtube-id" placeholder="https://youtube.com/watch?v=... or video ID">
+      </div>
     </div>
     <div id="qs-ndi-fields" style="display:none">
       <label>NDI Source</label>
@@ -454,11 +466,13 @@ let currentOutput = null;  // currently selected output id
 let outputState = {};      // { [outputId]: { mode, params } } — last applied per output
 let queuingStream = 'youtube';
 let queuingSize = 70;
+let webcasts = [];         // [{ eventKey, eventName, date, kind, id }]
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 renderRecentPins();
 loadNexusEvents();
+loadWebcasts();
 
 const prePin = new URLSearchParams(location.search).get('pin');
 if (prePin) {
@@ -694,11 +708,20 @@ function applyMode() {
       break;
     }
     case 'youtube': {
-      const val = document.getElementById('youtube-id').value.trim();
-      if (!val) { toast('Enter YouTube URL or ID'); return; }
-      const id = extractYouTubeId(val);
-      if (!id) { toast('Could not parse YouTube video ID'); return; }
-      msg = { type: 'set_mode', mode: 'chromium', url: `http://localhost:3000/youtube?v=${id}` };
+      const sel = normalizeStreamSource(document.getElementById('youtube-webcast-select').value);
+      let url;
+      if (sel.startsWith('channel:')) {
+        url = `http://localhost:3000/youtube?channel=${encodeURIComponent(sel.slice(8))}`;
+      } else if (sel) {
+        url = `http://localhost:3000/youtube?v=${encodeURIComponent(sel)}`;
+      } else {
+        const val = document.getElementById('youtube-id').value.trim();
+        if (!val) { toast('Enter YouTube URL or ID'); return; }
+        const id = extractYouTubeId(val);
+        if (!id) { toast('Could not parse YouTube video ID'); return; }
+        url = `http://localhost:3000/youtube?v=${id}`;
+      }
+      msg = { type: 'set_mode', mode: 'chromium', url };
       break;
     }
     case 'url': {
@@ -715,11 +738,18 @@ function applyMode() {
       if (!eventKey) { toast('Select or enter a Nexus event'); return; }
       let streamSource = '';
       if (queuingStream === 'youtube') {
-        const v = document.getElementById('queuing-youtube-id').value.trim();
-        if (!v) { toast('Enter YouTube URL or ID'); return; }
-        const id = extractYouTubeId(v);
-        if (!id) { toast('Could not parse YouTube video ID'); return; }
-        streamSource = id;
+        const sel = normalizeStreamSource(document.getElementById('queuing-webcast-select').value);
+        if (sel) {
+          // value is either a bare videoId or 'channel:UCxxx'; either is fine
+          // as a streamSource (queuing.html knows how to embed both).
+          streamSource = sel;
+        } else {
+          const v = document.getElementById('queuing-youtube-id').value.trim();
+          if (!v) { toast('Enter YouTube URL or ID'); return; }
+          const id = extractYouTubeId(v);
+          if (!id) { toast('Could not parse YouTube video ID'); return; }
+          streamSource = id;
+        }
       } else {
         streamSource = document.getElementById('queuing-ndi-select').value;
         if (!streamSource) { toast('Select an NDI source'); return; }
@@ -773,6 +803,47 @@ function extractYouTubeId(val) {
 }
 
 // ── Nexus events ──────────────────────────────────────────────────────────────
+
+async function loadWebcasts() {
+  try {
+    const r = await fetch('/api/webcasts');
+    webcasts = await r.json();
+  } catch { webcasts = []; }
+  populateWebcastDropdowns();
+}
+
+function populateWebcastDropdowns() {
+  const today = new Date().toISOString().slice(0, 10);
+  const opts = ['<option value="">— Custom (enter URL/ID below) —</option>'];
+  for (const w of webcasts) {
+    const dateLabel = w.date === today ? 'TODAY' : (w.date || '');
+    const datePart = dateLabel ? `[${dateLabel}] ` : '';
+    const kindPart = w.kind === 'channel' ? ' · live' : '';
+    const val = `${w.kind}:${w.id}`;
+    const label = `${datePart}${esc(w.eventName)}${kindPart}`;
+    opts.push(`<option value="${val}">${label}</option>`);
+  }
+  for (const id of ['youtube-webcast-select', 'queuing-webcast-select']) {
+    const sel = document.getElementById(id);
+    if (sel) sel.innerHTML = opts.join('');
+  }
+}
+
+function onYoutubeWebcastChange(prefix) {
+  // prefix = 'youtube' or 'queuing'; toggle the matching custom-fields block
+  const sel = document.getElementById(`${prefix}-webcast-select`);
+  const custom = document.getElementById(`${prefix}-custom-fields`);
+  if (sel && custom) custom.style.display = sel.value ? 'none' : '';
+}
+
+// streamSource is either '<videoId>' (old) or 'channel:<channelId>' (new).
+// The webcast dropdown emits 'video:<id>' or 'channel:<id>'; collapse video:
+// down to a bare ID so the daemon-side /youtube handler keeps working.
+function normalizeStreamSource(v) {
+  if (!v) return '';
+  if (v.startsWith('video:')) return v.slice(6);
+  return v;
+}
 
 async function loadNexusEvents() {
   try {

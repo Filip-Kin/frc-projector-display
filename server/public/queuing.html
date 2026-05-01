@@ -51,6 +51,13 @@
   }
   .match-card .header {
     display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    flex-shrink: 0;
+  }
+  /* Body wraps everything below the header so we can vertically-center the
+     alliances when the card has spare height (notably the on-field hero) */
+  .match-card .match-body {
+    flex: 1; min-height: 0;
+    display: flex; flex-direction: column; justify-content: center; gap: 4px;
   }
   .match-card .label  { font-size: 1.6em; font-weight: 800; color: #fff; line-height: 1; }
   .match-card .status { font-size: 0.7em; color: #888;
@@ -159,9 +166,16 @@ if (sizePct === 60) document.body.classList.add('size-60');
 // ── Stream area ──────────────────────────────────────────────────────────────
 
 const streamEl = document.getElementById('stream');
+function buildYoutubeEmbed(src) {
+  // src is either a 'channel:UCxxx' (live channel) or a video ID
+  if (src.startsWith('channel:')) {
+    return `https://www.youtube.com/embed/live_stream?channel=${encodeURIComponent(src.slice(8))}&autoplay=1&mute=1`;
+  }
+  return `https://www.youtube.com/embed/${encodeURIComponent(src)}?autoplay=1&rel=0&mute=1`;
+}
 if (streamType === 'youtube' && streamId) {
   const yt = document.createElement('iframe');
-  yt.src = `https://www.youtube.com/embed/${streamId}?autoplay=1&rel=0&mute=1`;
+  yt.src = buildYoutubeEmbed(streamId);
   yt.allow = 'autoplay;fullscreen';
   yt.allowFullscreen = true;
   streamEl.appendChild(yt);
@@ -191,9 +205,11 @@ function matchCardHtml(m, kind) {
       <span class="label">${esc(m.label)}</span>
       <span class="status">${esc(m.status || '')}</span>
     </div>
-    ${teamRow('RED',  'red-tag',  m.redTeams,  'red')}
-    ${teamRow('BLUE', 'blue-tag', m.blueTeams, 'blue')}
-    ${m.times?.estimatedStartTime ? `<div class="when">Start ~${fmtTime(m.times.estimatedStartTime)}</div>` : ''}
+    <div class="match-body">
+      ${teamRow('RED',  'red-tag',  m.redTeams,  'red')}
+      ${teamRow('BLUE', 'blue-tag', m.blueTeams, 'blue')}
+      ${m.times?.estimatedStartTime ? `<div class="when">Start ~${fmtTime(m.times.estimatedStartTime)}</div>` : ''}
+    </div>
   </div>`;
 }
 
