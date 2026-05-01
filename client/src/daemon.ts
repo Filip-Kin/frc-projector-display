@@ -3,7 +3,7 @@ import { execFile } from 'child_process';
 import { state, isAnyNdiActive } from './state.js';
 import { cdpNavigateAll } from './cdp.js';
 import {
-  setHomeOnOutput, setChromiumOnOutput, setNdiOnOutput,
+  setHomeOnOutput, setChromiumOnOutput, setNdiOnOutput, setQueuingOnOutput,
   setHomeAll, setVnc, setPin,
 } from './modes.js';
 import { initOutputs } from './outputs.js';
@@ -163,6 +163,15 @@ function connectToServer() {
           } else {
             setNdiOnOutput(outputId, msg.source, msg.bandwidth ?? 'high');
           }
+        }
+        else if (msg.mode === 'queuing' && msg.eventKey) {
+          await setQueuingOnOutput(
+            outputId,
+            msg.eventKey,
+            msg.streamType === 'ndi' ? 'ndi' : 'youtube',
+            msg.streamSource ?? '',
+            msg.streamSize === 60 ? 60 : 70,
+          );
         }
         break;
       }

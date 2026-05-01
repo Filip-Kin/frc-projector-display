@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Queuing Display</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100vw; height: 100vh; overflow: hidden; background: #000; color: #f0f0f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+  body {
+    --stream-pct: 70;
+    display: grid;
+    grid-template-columns: calc((100 - var(--stream-pct)) * 1%) calc(var(--stream-pct) * 1%);
+    grid-template-rows:    calc(var(--stream-pct) * 1%) calc((100 - var(--stream-pct)) * 1%);
+    grid-template-areas: "matches stream" "ann ann";
+  }
+  body.size-60 { --stream-pct: 60; }
+
+  /* ── Matches column ── */
+  #matches { grid-area: matches; padding: 18px 20px; overflow: hidden; background: #0d0d0d;
+    display: flex; flex-direction: column; gap: 10px; }
+  .col-title { font-size: 0.8rem; letter-spacing: 0.2em; color: #4af; font-weight: 700;
+    text-transform: uppercase; padding-bottom: 6px; border-bottom: 2px solid #1a3a55; }
+
+  .now-queuing {
+    background: linear-gradient(135deg, #fa0 0%, #f60 100%);
+    color: #000; padding: 14px 16px; border-radius: 10px;
+    box-shadow: 0 0 24px #fa04;
+  }
+  .now-queuing .label { font-size: 1rem; font-weight: 800; letter-spacing: 0.05em; opacity: 0.85; }
+  .now-queuing .title { font-size: 1.8rem; font-weight: 900; line-height: 1; margin: 4px 0 8px; }
+  .now-queuing .teams-row { display: flex; gap: 6px; }
+  .now-queuing .teams-row > div { flex: 1; display: flex; gap: 4px; flex-wrap: wrap; }
+  .now-queuing .team { background: #0008; color: #fff; padding: 3px 8px; border-radius: 4px;
+    font-weight: 700; font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+
+  .match-card { background: #181818; border-left: 4px solid #555; border-radius: 6px;
+    padding: 10px 12px; }
+  .match-card.on-deck { border-left-color: #fa0; }
+  .match-card .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .match-card .label { font-size: 0.95rem; font-weight: 700; color: #ddd; }
+  .match-card .status { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
+  .match-card .status.on-deck { color: #fa0; }
+  .match-card .teams { display: flex; gap: 6px; margin-top: 6px; font-size: 0.8rem; }
+  .match-card .red, .match-card .blue { flex: 1; display: flex; gap: 3px; flex-wrap: wrap; }
+  .match-card .red  .team { background: #3a0d0d; color: #f88; padding: 2px 5px; border-radius: 3px;
+    font-weight: 600; font-variant-numeric: tabular-nums; }
+  .match-card .blue .team { background: #0d1f3a; color: #8af; padding: 2px 5px; border-radius: 3px;
+    font-weight: 600; font-variant-numeric: tabular-nums; }
+  .match-card .when { font-size: 0.7rem; color: #666; margin-top: 4px; }
+
+  /* ── Stream area ── */
+  #stream { grid-area: stream; background: #000; position: relative; overflow: hidden; }
+  #stream iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #stream .ndi-placeholder {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #333; font-size: 1.2rem; letter-spacing: 0.1em;
+  }
+
+  /* ── Announcements row ── */
+  #ann { grid-area: ann; background: #0d0d0d; border-top: 2px solid #1a1a1a;
+    padding: 14px 20px; overflow: hidden; display: grid;
+    grid-template-columns: 2fr 1fr; gap: 24px; }
+  #ann .col { overflow: hidden; }
+  #ann .col-title { margin-bottom: 8px; }
+  #ann .ann-list { display: flex; flex-direction: column; gap: 6px; }
+  #ann .ann-item {
+    background: #181818; border-left: 4px solid #4af; padding: 8px 12px; border-radius: 4px;
+    font-size: 0.9rem; line-height: 1.35; color: #ddd;
+  }
+  #ann .ann-item .when { font-size: 0.7rem; color: #666; margin-top: 2px; }
+  #ann .parts-item { background: #181818; border-left: 4px solid #fa0; padding: 8px 12px;
+    border-radius: 4px; font-size: 0.85rem; }
+  #ann .parts-item .team { color: #fa0; font-weight: 700; }
+  #ann .parts-item .what { color: #ccc; margin-top: 2px; }
+  #ann .empty { color: #444; font-size: 0.85rem; font-style: italic; padding: 10px 0; }
+
+  /* ── Status footer ── */
+  #status { position: fixed; bottom: 4px; right: 8px; font-size: 0.7rem; color: #333;
+    pointer-events: none; }
+  #status.error { color: #f66; }
+</style>
+</head>
+<body>
+
+<section id="matches">
+  <div class="col-title">Matches</div>
+  <div id="matches-content"></div>
+</section>
+
+<section id="stream"></section>
+
+<section id="ann">
+  <div class="col">
+    <div class="col-title">Announcements</div>
+    <div id="ann-list" class="ann-list"></div>
+  </div>
+  <div class="col">
+    <div class="col-title">Parts Requests</div>
+    <div id="parts-list" class="ann-list"></div>
+  </div>
+</section>
+
+<div id="status">…</div>
+
+<script>
+const params    = new URLSearchParams(location.search);
+const eventKey  = (params.get('event') || '').trim();
+const streamType= (params.get('stream') || 'youtube').toLowerCase();
+const streamId  = params.get('streamId') || '';
+const sizePct   = parseInt(params.get('size') || '70', 10);
+
+if (sizePct === 60) document.body.classList.add('size-60');
+
+// Stream area
+const streamEl = document.getElementById('stream');
+if (streamType === 'youtube' && streamId) {
+  const yt = document.createElement('iframe');
+  yt.src = `https://www.youtube.com/embed/${streamId}?autoplay=1&rel=0&mute=1`;
+  yt.allow = 'autoplay;fullscreen';
+  yt.allowFullscreen = true;
+  streamEl.appendChild(yt);
+} else if (streamType === 'ndi') {
+  streamEl.innerHTML = '<div class="ndi-placeholder">NDI</div>';
+} else {
+  streamEl.innerHTML = '<div class="ndi-placeholder">No stream configured</div>';
+}
+
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtTime(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function renderMatches(data) {
+  const out = document.getElementById('matches-content');
+  if (!data || !Array.isArray(data.matches)) {
+    out.innerHTML = '<div style="color:#444;padding:20px 0">No data</div>';
+    return;
+  }
+  // Filter to scheduled-but-not-completed: anything with a label and a status indicating future
+  const upcoming = data.matches
+    .filter(m => m && m.label && m.status)
+    .filter(m => /now queuing|on deck|on field|queuing soon|queued/i.test(m.status));
+
+  // Find "now queuing" specifically; show as the hero card.
+  const nowQ = upcoming.find(m => /now queuing/i.test(m.status))
+            || upcoming.find(m => /on field/i.test(m.status));
+
+  let html = '';
+  if (nowQ) {
+    const red  = (nowQ.redTeams  || []).map(t => `<span class="team">${esc(t)}</span>`).join('');
+    const blue = (nowQ.blueTeams || []).map(t => `<span class="team">${esc(t)}</span>`).join('');
+    html += `
+      <div class="now-queuing">
+        <div class="label">${esc(nowQ.status)}</div>
+        <div class="title">${esc(nowQ.label)}</div>
+        <div class="teams-row">
+          <div>${red || '<span style="opacity:0.5">—</span>'}</div>
+          <div>${blue || '<span style="opacity:0.5">—</span>'}</div>
+        </div>
+      </div>`;
+  } else if (data.nowQueuing) {
+    html += `<div class="now-queuing"><div class="label">Now Queuing</div><div class="title">${esc(data.nowQueuing)}</div></div>`;
+  }
+
+  // Show next 4 after now-queuing, in array order
+  const nextBatch = upcoming.filter(m => m !== nowQ).slice(0, 4);
+  for (const m of nextBatch) {
+    const red  = (m.redTeams  || []).map(t => `<span class="team">${esc(t)}</span>`).join('');
+    const blue = (m.blueTeams || []).map(t => `<span class="team">${esc(t)}</span>`).join('');
+    const onDeck = /on deck/i.test(m.status);
+    const when = m.times?.estimatedStartTime ? `Start ~${fmtTime(m.times.estimatedStartTime)}` : '';
+    html += `
+      <div class="match-card ${onDeck ? 'on-deck' : ''}">
+        <div class="row">
+          <span class="label">${esc(m.label)}</span>
+          <span class="status ${onDeck ? 'on-deck' : ''}">${esc(m.status)}</span>
+        </div>
+        <div class="teams">
+          <div class="red">${red}</div>
+          <div class="blue">${blue}</div>
+        </div>
+        ${when ? `<div class="when">${esc(when)}</div>` : ''}
+      </div>`;
+  }
+
+  if (!html) html = '<div style="color:#444;padding:20px 0">No upcoming matches</div>';
+  out.innerHTML = html;
+}
+
+function renderAnnouncements(data) {
+  const annOut = document.getElementById('ann-list');
+  const partsOut = document.getElementById('parts-list');
+  const anns = data?.announcements || [];
+  const parts = data?.partsRequests || [];
+
+  annOut.innerHTML = anns.length
+    ? anns.map(a => `
+        <div class="ann-item">
+          ${esc(a.announcement || '')}
+          <div class="when">${fmtTime(a.postedTime)}</div>
+        </div>`).join('')
+    : '<div class="empty">No active announcements</div>';
+
+  partsOut.innerHTML = parts.length
+    ? parts.map(p => `
+        <div class="parts-item">
+          <span class="team">Team ${esc(p.requestedByTeam || '?')}</span>
+          <div class="what">${esc(p.parts || '')}</div>
+        </div>`).join('')
+    : '<div class="empty">No parts requests</div>';
+}
+
+const statusEl = document.getElementById('status');
+let lastOk = 0;
+
+async function poll() {
+  if (!eventKey) {
+    statusEl.classList.add('error');
+    statusEl.textContent = 'no event key in URL';
+    return;
+  }
+  try {
+    const r = await fetch(`/api/nexus/event/${encodeURIComponent(eventKey)}`, { cache: 'no-store' });
+    if (!r.ok) {
+      statusEl.classList.add('error');
+      statusEl.textContent = `event fetch failed: HTTP ${r.status}`;
+      return;
+    }
+    const data = await r.json();
+    renderMatches(data);
+    renderAnnouncements(data);
+    lastOk = Date.now();
+    statusEl.classList.remove('error');
+    statusEl.textContent = `${eventKey} · updated ${new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
+  } catch (err) {
+    statusEl.classList.add('error');
+    statusEl.textContent = 'fetch error: ' + err.message;
+  }
+}
+
+poll();
+setInterval(poll, 15000);
+</script>
+</body>
+</html>

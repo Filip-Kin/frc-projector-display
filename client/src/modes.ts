@@ -36,6 +36,48 @@ export async function setChromiumOnOutput(outputId: string, url: string) {
   await cdpNavigate(url, o.cdpPort);
 }
 
+export async function setQueuingOnOutput(
+  outputId: string,
+  eventKey: string,
+  streamType: 'youtube' | 'ndi',
+  streamSource: string,
+  size: number = 70,
+) {
+  const o = getOutput(outputId); if (!o) return;
+  await stopNdiOnOutput(o);
+
+  const u = new URL(`${SERVER_URL}/queuing`);
+  u.searchParams.set('event', eventKey);
+  u.searchParams.set('stream', streamType);
+  u.searchParams.set('size', String(size));
+  if (streamType === 'youtube') u.searchParams.set('streamId', streamSource);
+
+  o.mode = 'queuing';
+  await cdpNavigate(u.toString(), o.cdpPort);
+
+  if (streamType === 'ndi' && streamSource) {
+    const streamW = Math.round(o.width  * size / 100);
+    const streamH = Math.round(o.height * size / 100);
+    const streamX = o.width - streamW;
+    const streamY = o.yOffset;
+    const geom = `${streamW}x${streamH}+${streamX}+${streamY}`;
+    const env = {
+      ...process.env,
+      DISPLAY: process.env.DISPLAY ?? ':0',
+      SDL_VIDEO_FULLSCREEN_DISPLAY: String(o.displayIndex),
+    };
+    const proc = spawn('ndi-play-wrapper', [streamSource, 'high', '--window', geom], { env, detached: false });
+    proc.on('exit', code => {
+      console.log(`[ndi:${o.id}] (queuing corner) exited (${code})`);
+      if (o.ndiProcess === proc) o.ndiProcess = null;
+    });
+    o.ndiProcess = proc;
+    console.log(`[queuing:${o.id}] event=${eventKey} ndi="${streamSource}" geom=${geom}`);
+  } else {
+    console.log(`[queuing:${o.id}] event=${eventKey} youtube=${streamSource} size=${size}%`);
+  }
+}
+
 export function setNdiOnOutput(outputId: string, source: string, bandwidth: 'high' | 'low' = 'high') {
   const o = getOutput(outputId); if (!o) return;
 

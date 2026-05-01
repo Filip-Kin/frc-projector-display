@@ -317,6 +317,9 @@
     <div class="mode-btn" id="mode-url" onclick="selectMode('url')">
       <span class="icon">🌐</span>Custom URL
     </div>
+    <div class="mode-btn" id="mode-queuing" onclick="selectMode('queuing')" style="grid-column: span 2">
+      <span class="icon">📺</span>Queuing + Stream
+    </div>
   </div>
 
   <!-- NDI / OMT config -->
@@ -368,6 +371,38 @@
     <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
   </div>
 
+  <!-- Queuing + Stream config -->
+  <div class="mode-config" id="config-queuing">
+    <label>Nexus Event</label>
+    <select id="queuing-event-select" style="display:none">
+      <option value="">-- loading events… --</option>
+    </select>
+    <input type="text" id="queuing-event-input" placeholder="e.g. 2026curie">
+
+    <label style="margin-top:14px">Stream</label>
+    <div style="display:flex;gap:6px">
+      <button type="button" id="qs-youtube" class="secondary" onclick="setQueuingStream('youtube')" style="flex:1;padding:9px;font-size:0.85rem">YouTube</button>
+      <button type="button" id="qs-ndi"     class="secondary" onclick="setQueuingStream('ndi')"     style="flex:1;padding:9px;font-size:0.85rem">NDI</button>
+    </div>
+
+    <div id="qs-youtube-fields">
+      <label>YouTube URL or Video ID</label>
+      <input type="text" id="queuing-youtube-id" placeholder="https://youtube.com/watch?v=... or video ID">
+    </div>
+    <div id="qs-ndi-fields" style="display:none">
+      <label>NDI Source</label>
+      <select id="queuing-ndi-select"><option value="">-- detecting sources… --</option></select>
+    </div>
+
+    <label style="margin-top:14px">Stream Size</label>
+    <div style="display:flex;gap:6px">
+      <button type="button" id="qs-size-70" class="secondary" onclick="setQueuingSize(70)" style="flex:1;padding:9px;font-size:0.85rem">70%</button>
+      <button type="button" id="qs-size-60" class="secondary" onclick="setQueuingSize(60)" style="flex:1;padding:9px;font-size:0.85rem">60%</button>
+    </div>
+
+    <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
+  </div>
+
   <!-- System metrics -->
   <div class="section-title">System</div>
   <div id="metrics-panel" class="empty">Waiting for metrics…</div>
@@ -401,6 +436,8 @@ let nexusEvents = [];
 let outputs = [];          // [{ id, width, height }]
 let currentOutput = null;  // currently selected output id
 let outputState = {};      // { [outputId]: { mode, params } } — last applied per output
+let queuingStream = 'youtube';
+let queuingSize = 70;
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
@@ -576,7 +613,39 @@ function selectMode(mode) {
   } else if (mode === 'ndi') {
     sendMsg({ type: 'refresh_ndi' });
     ndiRefreshTimer = setInterval(() => sendMsg({ type: 'refresh_ndi' }), 20000);
+  } else if (mode === 'queuing') {
+    setQueuingStream(queuingStream);
+    setQueuingSize(queuingSize);
+    // Need NDI sources too in case the user picks NDI for the corner
+    sendMsg({ type: 'refresh_ndi' });
+    ndiRefreshTimer = setInterval(() => sendMsg({ type: 'refresh_ndi' }), 20000);
   }
+}
+
+function setQueuingStream(t) {
+  queuingStream = t;
+  document.getElementById('qs-youtube').style.background = t === 'youtube' ? '#333' : '#252525';
+  document.getElementById('qs-ndi'    ).style.background = t === 'ndi'     ? '#333' : '#252525';
+  document.getElementById('qs-youtube-fields').style.display = t === 'youtube' ? '' : 'none';
+  document.getElementById('qs-ndi-fields'    ).style.display = t === 'ndi'     ? '' : 'none';
+  if (t === 'ndi') populateQueuingNdi();
+}
+function setQueuingSize(n) {
+  queuingSize = n;
+  document.getElementById('qs-size-70').style.background = n === 70 ? '#333' : '#252525';
+  document.getElementById('qs-size-60').style.background = n === 60 ? '#333' : '#252525';
+}
+function populateQueuingNdi() {
+  const sel = document.getElementById('queuing-ndi-select');
+  const prev = sel.value;
+  sel.innerHTML = ndiSources.length
+    ? ndiSources.map(s => {
+        const label = typeof s === 'object' ? s.label : s;
+        const val   = typeof s === 'object' ? s.value : s;
+        return `<option value="${val}">${label}</option>`;
+      }).join('')
+    : '<option value="">-- no sources found --</option>';
+  if (prev && ndiSources.some(s => (typeof s === 'object' ? s.value : s) === prev)) sel.value = prev;
 }
 
 function applyMode() {
@@ -623,6 +692,27 @@ function applyMode() {
       msg = { type: 'set_mode', mode: 'chromium', url: u };
       break;
     }
+    case 'queuing': {
+      const sel = document.getElementById('queuing-event-select');
+      const inp = document.getElementById('queuing-event-input');
+      const eventKey = sel.style.display !== 'none' ? sel.value : inp.value.trim();
+      if (!eventKey) { toast('Select or enter a Nexus event'); return; }
+      let streamSource = '';
+      if (queuingStream === 'youtube') {
+        const v = document.getElementById('queuing-youtube-id').value.trim();
+        if (!v) { toast('Enter YouTube URL or ID'); return; }
+        const id = extractYouTubeId(v);
+        if (!id) { toast('Could not parse YouTube video ID'); return; }
+        streamSource = id;
+      } else {
+        streamSource = document.getElementById('queuing-ndi-select').value;
+        if (!streamSource) { toast('Select an NDI source'); return; }
+        if (streamSource.startsWith('omt://')) { toast('OMT not supported yet'); return; }
+      }
+      msg = { type: 'set_mode', mode: 'queuing', eventKey,
+              streamType: queuingStream, streamSource, streamSize: queuingSize };
+      break;
+    }
     default: toast('Select a mode first'); return;
   }
   msg.output = currentOutput;
@@ -650,6 +740,7 @@ function updateNdiSources(sources) {
     : '<option value="">-- no sources found --</option>';
   const prevValid = ndiSources.some(s => (typeof s === 'object' ? s.value : s) === prev);
   if (prev && prevValid) sel.value = prev;
+  if (selectedMode === 'queuing' && queuingStream === 'ndi') populateQueuingNdi();
 }
 
 // ── YouTube ───────────────────────────────────────────────────────────────────
@@ -670,10 +761,14 @@ async function loadNexusEvents() {
     const events = await r.json();
     if (events.length) {
       nexusEvents = events;
-      const sel = document.getElementById('nexus-event-select');
-      sel.innerHTML = events.map(e => `<option value="${e.key}">${e.name} (${e.key})</option>`).join('');
-      sel.style.display = '';
+      const html = events.map(e => `<option value="${e.key}">${e.name} (${e.key})</option>`).join('');
+      for (const id of ['nexus-event-select', 'queuing-event-select']) {
+        const sel = document.getElementById(id);
+        if (sel) { sel.innerHTML = html; sel.style.display = ''; }
+      }
       document.getElementById('nexus-event-input').style.display = 'none';
+      const qInput = document.getElementById('queuing-event-input');
+      if (qInput) qInput.style.display = 'none';
     }
   } catch {}
 }
