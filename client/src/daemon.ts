@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { execFile } from 'child_process';
 import { state, isAnyNdiActive } from './state.js';
-import { cdpNavigateAll } from './cdp.js';
+import { cdpNavigate, cdpNavigateAll } from './cdp.js';
 import {
   setHomeOnOutput, setChromiumOnOutput, setNdiOnOutput, setQueuingOnOutput,
   setHomeAll, setVnc, setPin,
@@ -151,14 +151,22 @@ function connectToServer() {
       state.apMode = false; state.apIface = null;
       await stopProvisioningExtras();
     }
-    if (!hasReplayedOnce && persisted) {
+    if (!hasReplayedOnce) {
       hasReplayedOnce = true;
+      // Outputs with a saved mode get replayed; everything else navigates to
+      // the home QR (covers fresh installs, freshly-added outputs, and any
+      // output that's never had a set_mode applied to it).
+      const recs = getPersistedOutputs();
+      await Promise.all(state.outputs.map(o =>
+        recs[o.id]
+          ? Promise.resolve()
+          : cdpNavigate(`http://localhost:${LOCAL_PORT}/`, o.cdpPort).catch(() => {})
+      ));
       await replayPersistedOutputs();
-      // Outputs without a persisted mode stay on the home QR that initOutputs
-      // already navigated them to; nothing to do for them here.
-    } else {
-      // Either fresh-start (no persisted mode) or we just left AP mode and
-      // need to clear the AP page off every kiosk.
+    } else if (wasApMode) {
+      // Coming back from AP mode — every kiosk was showing the AP page;
+      // navigate them all to home (replayed outputs will get re-replayed via
+      // their state, but that's a follow-up; for now this is the simple recovery).
       await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
     }
 
