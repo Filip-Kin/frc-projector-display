@@ -109,12 +109,10 @@ export async function initOutputs(): Promise<void> {
     state.outputs = [];
     return;
   }
-  // Primary first, then alphabetical; SDL display index will match xrandr
-  // enumeration order after we apply the layout.
-  detected.sort((a, b) => {
-    if (a.primary !== b.primary) return a.primary ? -1 : 1;
-    return a.id.localeCompare(b.id);
-  });
+  // Sort purely by name. xrandr's "primary" flag isn't stable across reboots
+  // on multi-output Bay Trail (HDMI vs VGA primary flipped between boots),
+  // and that would shuffle Screen-1/Screen-2 labels and chromium positions.
+  detected.sort((a, b) => a.id.localeCompare(b.id));
 
   await applyVerticalLayout(detected);
 
@@ -139,6 +137,33 @@ export async function initOutputs(): Promise<void> {
     o.chromiumProcess = spawnChromiumForOutput(o);
     console.log(`[outputs] ${o.id} ${o.width}x${o.height}+0+${o.yOffset} cdp=${o.cdpPort} display=${o.displayIndex}`);
   }
+
+  startStrayChromiumWatcher();
+}
+
+// Catches the legacy openbox autostart chromium that races our startup on
+// boxes that haven't re-run install.sh since v1.2.0. Polls for 60s after
+// daemon start; long enough for autostart to settle but short enough to
+// not be a permanent watchdog.
+function startStrayChromiumWatcher() {
+  const ourDirs = new Set(state.outputs.map(o => `--user-data-dir=/tmp/chromium-${o.id}`));
+  let ticks = 0;
+  const tick = async () => {
+    ticks++;
+    const procs = await new Promise<string>(r => exec('ps -ww -eo pid,args 2>/dev/null', (_e, out) => r(out ?? '')));
+    for (const line of procs.split('\n')) {
+      const m = line.match(/^\s*(\d+)\s+(.*chromium\b.*--remote-debugging-port[=\s]\d+.*)/);
+      if (!m) continue;
+      const args = m[2];
+      if (/--type=/.test(args)) continue;                           // child renderer/etc
+      if ([...ourDirs].some(d => args.includes(d))) continue;       // one of ours
+      const pid = parseInt(m[1], 10);
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+      console.log(`[outputs] killed stray chromium pid=${pid}`);
+    }
+    if (ticks < 12) setTimeout(tick, 5000);
+  };
+  setTimeout(tick, 3000);
 }
 
 export function getOutput(id: string): OutputState | undefined {
