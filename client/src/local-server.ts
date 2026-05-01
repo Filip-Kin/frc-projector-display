@@ -26,37 +26,14 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Captive portal: when in AP mode, redirect unknown hosts to /setup.
-// Android-friendly mode: once the user has visited /setup, subsequent
-// connectivity probes get 204 ("signed in") — prevents auto-disconnect to
-// home WiFi while the user is still configuring.
-let setupVisitedAt: number | null = null;
-
+// Captive portal: when in AP mode, redirect any non-local request to /setup.
+// This makes the OS show the "Sign in to network" notification on phones.
 app.use((req, res, next) => {
   if (!state.apMode) return next();
   const host = (req.get('host') ?? '').split(':')[0];
-
-  // Local AP IP traffic — pass through to actual routes
   if (host === AP_IP || host === 'localhost' || host === '127.0.0.1') {
     return next();
   }
-
-  const ua = (req.get('user-agent') ?? '').toLowerCase();
-  const isAndroidProbe = req.path === '/generate_204' || req.path === '/gen_204';
-  const isWindowsProbe = req.path === '/connecttest.txt' || req.path === '/ncsi.txt';
-  const isAppleProbe   = req.path === '/hotspot-detect.html' || req.path === '/library/test/success.html';
-  const isProbe = isAndroidProbe || isWindowsProbe || isAppleProbe || ua.includes('captiveportal');
-
-  // After user has loaded setup page, tell connectivity probes the network is fine
-  // → Android keeps the connection instead of auto-switching back to home WiFi
-  if (isProbe && setupVisitedAt && Date.now() - setupVisitedAt < 5 * 60 * 1000) {
-    if (isAndroidProbe) return res.status(204).end();
-    if (isAppleProbe)   return res.send('<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>');
-    if (isWindowsProbe) return res.send('Microsoft Connect Test');
-    return res.status(204).end();
-  }
-
-  // First-time probe (or expired) — redirect to setup so the captive portal popup appears
   return res.redirect(`http://${AP_IP}:${LOCAL_PORT}/setup`);
 });
 
@@ -136,7 +113,6 @@ app.get('/api/internet-status', async (_req, res) => {
 });
 
 app.get('/setup', async (_req, res) => {
-  setupVisitedAt = Date.now();   // tells future probes to return 204 (Android-friendly)
   const networks = await scanWifi().catch(() => []);
   res.send(buildSetupPage(networks));
 });
@@ -217,7 +193,6 @@ export async function enterApMode() {
   // Stop any active media — ndi-play covers Chromium fullscreen so clear it first
   await stopNdi();
   stopVnc();
-  setupVisitedAt = null;  // reset captive portal state for new AP session
   console.log('[ap] media stopped');
 
   const { getWifiInterface } = await import('./wifi.js');
