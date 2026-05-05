@@ -98,6 +98,14 @@ export function handleDevice(ws: WebSocket) {
 
   ws.on('close', () => {
     if (!pin) return;
+    // Only mark this device disconnected if THIS ws is still the registered
+    // one. A force-reconnect from the daemon can have the old ws's close
+    // fire after the new ws has already registered, and a blind delete here
+    // wipes the new (still-live) connection out of the devices map.
+    if (devices.get(pin)?.ws !== ws) {
+      console.log(`[device] ${pin} stale ws closed (newer ws already registered) — keeping device`);
+      return;
+    }
     devices.delete(pin);
     console.log(`[device] ${pin} disconnected`);
     const ctrl = controllers.get(pin);

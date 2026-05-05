@@ -97,7 +97,7 @@ export async function scanWifi(): Promise<WifiNetwork[]> {
         if (!ssid || seen.has(ssid)) continue;
         // Hide our own AP (and any other display's AP) from the picker — selecting
         // it would just connect the device back to itself.
-        if (/^FRC-Display-/.test(ssid)) continue;
+        if (/^Display-/.test(ssid)) continue;
         seen.add(ssid);
         networks.push({ ssid, signal, secured: security !== '--' && security !== '' });
       }

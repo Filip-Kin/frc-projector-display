@@ -52,7 +52,7 @@ function generatePin() {
 const persisted = loadState();
 const PIN = persisted?.pin ?? generatePin();
 if (!persisted) initState(PIN);
-const AP_SSID    = `FRC-Display-${PIN}`;
+const AP_SSID    = `Display-${PIN}`;
 const CONTROL_URL = `${SERVER_BASE}/control?pin=${PIN}`;
 
 setPin(PIN);

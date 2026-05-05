@@ -247,7 +247,7 @@ cat > /usr/local/bin/frc-ap-start << 'SCRIPT'
 #!/bin/bash
 # frc-ap-start {pin} {iface} — create open WiFi AP for provisioning
 PIN="$1"; IFACE="$2"
-SSID="FRC-Display-${PIN}"
+SSID="Display-${PIN}"
 
 # Clean any leftover AP profile
 nmcli con delete "frc-provision" 2>/dev/null || true
