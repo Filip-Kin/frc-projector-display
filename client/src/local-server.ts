@@ -318,13 +318,12 @@ app.post('/api/eth-config', async (req, res) => {
 });
 
 app.get('/api/internet-status', async (_req, res) => {
-  const result = await checkInternet();
-  if (result.online && !state.postConnectInProgress) {
-    res.json({ online: true, status: 'proceeding' });
-    runPostConnect();
-  } else {
-    res.json(result);
-  }
+  // Pure status read — no side effects. The setup page and the /connecting
+  // page both poll this; triggering runPostConnect from here re-navigates
+  // the kiosks to /connecting on every poll, causing a tight loop.
+  // runPostConnect is already invoked exactly once from applyCredentials
+  // when credentials are accepted; no other trigger needed.
+  res.json(await checkInternet());
 });
 
 app.get('/setup', async (_req, res) => {
@@ -442,11 +441,17 @@ export async function runPostConnect() {
     // and gives us a clean "[update] done" log line before the restart.
     exec('nohup sh -c "sleep 1 && sudo systemctl restart display-daemon" >/dev/null 2>&1 &', () => {});
   } else {
-    // Don't go straight to home QR; that would lie to operators when the
-    // device-to-server WS hasn't actually reconnected yet. Show the connecting
-    // spinner and let the WS-open handler in daemon.ts navigate to / when the
-    // server hand-shake completes.
-    await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+    // If WS is already back up, restoreOutputs has already navigated each
+    // kiosk to its persisted mode — don't override that with the spinner.
+    // Only show /connecting when the WS hasn't reconnected yet, in which
+    // case the on('open') handler will restoreOutputs once it does.
+    if (state.serverWs?.readyState !== WebSocket.OPEN) {
+      console.log('[update] no client update; WS still down — showing connecting screen');
+      state.kiosksShowingConnecting = true;
+      await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+    } else {
+      console.log('[update] no client update; WS already up — leaving kiosks as restored');
+    }
     state.postConnectInProgress = false;
   }
 }
