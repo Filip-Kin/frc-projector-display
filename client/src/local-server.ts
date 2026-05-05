@@ -440,6 +440,11 @@ export async function runPostConnect() {
     // device-to-server WS hasn't actually reconnected yet. Show the connecting
     // spinner and let the WS-open handler in daemon.ts navigate to / when the
     // server hand-shake completes.
+    // Mark kiosksShowingConnecting=true so on('open') knows to restore us
+    // away from /connecting once WS handshakes — without this, hasReplayedOnce
+    // is already true and apMode is already cleared, so needRestore is false
+    // and the kiosk sits on /connecting forever.
+    state.kiosksShowingConnecting = true;
     await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
     state.postConnectInProgress = false;
   }
