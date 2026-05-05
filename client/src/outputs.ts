@@ -114,8 +114,11 @@ export async function initOutputs(): Promise<void> {
 
   const detected = (await xrandrQuery()).filter(o => o.connected);
   if (detected.length === 0) {
-    console.log('[outputs] no connected monitors detected');
+    console.log('[outputs] no connected monitors detected — waiting for hotplug');
     state.outputs = [];
+    // Start the watcher anyway so a monitor plugged in (or powered on)
+    // after boot gets picked up without requiring a daemon restart.
+    startHotplugWatcher();
     return;
   }
   detected.sort((a, b) => a.id.localeCompare(b.id));
