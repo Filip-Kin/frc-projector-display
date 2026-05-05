@@ -162,7 +162,8 @@ app.get('/youtube', async (req, res) => {
   }
 
   let src = '';
-  if (ch) src = buildSrc({ kind: 'channel', id: ch });
+  let isLive = false;
+  if (ch) { src = buildSrc({ kind: 'channel', id: ch }); isLive = true; }
   else if (v) src = buildSrc({ kind: 'video', id: v });
   else if (ev) {
     // Server-side resolve so the iframe loads with a real URL on first paint.
@@ -177,7 +178,11 @@ app.get('/youtube', async (req, res) => {
           .on('timeout', () => resolve(''));
       });
       const w = upstream ? JSON.parse(upstream) : null;
-      if (w?.id) src = buildSrc({ kind: w.kind === 'channel' ? 'channel' : 'video', id: w.id });
+      if (w?.id) {
+        const kind = w.kind === 'channel' ? 'channel' : 'video';
+        src = buildSrc({ kind, id: w.id });
+        if (kind === 'channel') isLive = true;
+      }
     } catch {}
   }
   if (!src) { res.status(404).send('no stream available'); return; }
@@ -194,20 +199,23 @@ iframe{position:fixed;top:0;left:0;width:100%;height:100%;border:0}
 <iframe id="yt" src="${src}" allow="autoplay;fullscreen" allowfullscreen></iframe>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
+const IS_LIVE = ${isLive ? 'true' : 'false'};
 function onYouTubeIframeAPIReady() {
   const player = new YT.Player('yt', {
     events: {
       onReady: (e) => {
-        // Unmute once the player has had a moment to start. The mute=1 in
-        // the URL is what lets autoplay succeed; we flip it off as soon as
-        // the player is ready so the operator gets audio. Also seekTo past
-        // the playable end so live streams snap to live edge instead of
-        // resuming wherever the previous session left off.
+        // Unmute once the player has had a moment to start. mute=1 in the
+        // URL is what lets autoplay succeed; we flip it off as soon as the
+        // player is ready so the operator gets audio.
+        // For live streams only, seekTo past the playable end so we snap to
+        // live edge. Doing this on a VOD video seeks past the end and the
+        // player goes to ENDED state, which is why videos appeared to load
+        // but never play.
         setTimeout(() => {
           try {
             e.target.unMute();
             e.target.setVolume(100);
-            e.target.seekTo(Number.MAX_SAFE_INTEGER, true);
+            if (IS_LIVE) e.target.seekTo(Number.MAX_SAFE_INTEGER, true);
           } catch {}
         }, 1200);
       }
