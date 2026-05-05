@@ -177,6 +177,13 @@ function connectToServer() {
   log('info', `[ws] connecting to ${wsUrl}`);
   state.serverWs = new WebSocket(wsUrl);
 
+  // Attach the pong listener BEFORE the on('open') handler runs its async
+  // chain — otherwise any pong arriving during the awaits below is dropped
+  // and the very first ping never sees a reply, triggering a tight
+  // "no pong — force reconnecting" loop after wifi handovers.
+  let pongReceived = true;
+  state.serverWs.on('pong', () => { pongReceived = true; });
+
   state.serverWs.on('open', async () => {
     state.wsEverConnected = true;
     if (apCheckTimer) { clearTimeout(apCheckTimer); apCheckTimer = null; }
@@ -217,16 +224,23 @@ function connectToServer() {
       outputModes: currentOutputModes(),
     }));
 
-    let pongReceived = true;
     let pingTick = 0;
-    state.serverWs!.on('pong', () => { pongReceived = true; });
+    let consecutiveMisses = 0;
     heartbeatInterval = setInterval(() => {
       const ws = state.serverWs;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       if (!pongReceived) {
-        log('warn', '[ws] no pong — force reconnecting');
-        state.forceWsReconnect?.();
-        return;
+        consecutiveMisses += 1;
+        // Tolerate up to two consecutive misses (10s) before we give up —
+        // a single missed pong could just be event-loop latency or a brief
+        // proxy hiccup, especially right after a network reconfigure.
+        if (consecutiveMisses >= 3) {
+          log('warn', `[ws] ${consecutiveMisses} missed pongs — force reconnecting`);
+          state.forceWsReconnect?.();
+          return;
+        }
+      } else {
+        consecutiveMisses = 0;
       }
       pongReceived = false;
       ws.ping();
