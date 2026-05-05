@@ -57,7 +57,7 @@ case $PKG_MGR in
       chromium x11vnc unclutter \
       ffmpeg curl tar python3 \
       network-manager wpasupplicant dnsmasq iptables \
-      avahi-utils \
+      avahi-daemon avahi-utils libnss-mdns \
       bluez bluez-tools \
       pipewire pipewire-pulse wireplumber pulseaudio-utils \
       libasound2-plugins >/dev/null
@@ -450,7 +450,7 @@ chmod 755 /usr/local/bin/frc-eth-dhcp
 # ── Sudoers for WiFi + ethernet helpers ───────────────────────────────────────
 echo "[10] Configuring sudoers..."
 cat > /etc/sudoers.d/frc-display << SUDOCONF
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-wifi-up, /usr/local/bin/frc-handoff, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-wifi-up, /usr/local/bin/frc-handoff, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm, /bin/systemctl restart display-daemon
 SUDOCONF
 chmod 440 /etc/sudoers.d/frc-display
 

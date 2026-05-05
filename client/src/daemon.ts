@@ -1,6 +1,23 @@
 import { WebSocket } from 'ws';
-import { execFile } from 'child_process';
+import { execFile, execSync } from 'child_process';
 import { hostname as osHostname } from 'os';
+
+// Singleton enforcement: a stale daemon left running from a previous
+// lifecycle (e.g. AP-mode handoff that didn't reach a clean systemctl
+// restart) fights the new instance over the same PIN/WS, which surfaces
+// as an endless "no pong — force reconnecting" loop on the server end.
+// Kill any other daemon.ts processes at startup before we register.
+(() => {
+  try {
+    const pids = execSync('pgrep -f src/daemon\\.ts', { encoding: 'utf8' })
+      .trim().split('\n').map(s => parseInt(s, 10))
+      .filter(p => Number.isInteger(p) && p > 0 && p !== process.pid && p !== process.ppid);
+    for (const p of pids) {
+      console.warn(`[daemon] stale daemon detected (pid=${p}), sending SIGTERM`);
+      try { process.kill(p, 'SIGTERM'); } catch {}
+    }
+  } catch { /* pgrep exit 1 = no matches; fine */ }
+})();
 import { state, isAnyNdiActive } from './state.js';
 import { cdpNavigate, cdpNavigateAll } from './cdp.js';
 import {

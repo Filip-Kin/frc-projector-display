@@ -430,8 +430,11 @@ export async function runPostConnect() {
   } catch (e: any) { console.error('[update]', e.message); }
 
   if (updated) {
-    console.log('[update] restarting display session');
-    exec('sudo systemctl restart lightdm', () => {});
+    console.log('[update] restarting display-daemon to load new client code');
+    // Detached so we survive systemd's SIGTERM long enough to dispatch.
+    // The 1s delay lets the iframe API in /connecting render a final paint
+    // and gives us a clean "[update] done" log line before the restart.
+    exec('nohup sh -c "sleep 1 && sudo systemctl restart display-daemon" >/dev/null 2>&1 &', () => {});
   } else {
     // Don't go straight to home QR; that would lie to operators when the
     // device-to-server WS hasn't actually reconnected yet. Show the connecting
