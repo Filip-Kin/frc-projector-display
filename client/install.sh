@@ -56,7 +56,7 @@ case $PKG_MGR in
       xorg openbox lightdm lightdm-gtk-greeter \
       chromium x11vnc unclutter \
       ffmpeg curl tar python3 \
-      network-manager dnsmasq iptables \
+      network-manager wpasupplicant dnsmasq iptables \
       avahi-utils \
       bluez bluez-tools \
       pipewire pipewire-pulse wireplumber pulseaudio-utils \

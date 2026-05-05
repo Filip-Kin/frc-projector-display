@@ -11,6 +11,7 @@ import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
 import { localServer, httpsServer, LOCAL_PORT, enterApMode, initServer, stopProvisioningExtras } from './local-server.js';
 import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
+import { checkInternet } from './wifi.js';
 import { startNetworkMonitor } from './network-monitor.js';
 import { sampleMetrics } from './metrics.js';
 import {
@@ -368,8 +369,21 @@ async function runNetworkStartup() {
     }
   }
 
+  // The 15s sleep above isn't always enough on a cold boot — DHCP can finish
+  // late, then DNS+TLS+WS handshake adds a few more seconds. Probe the server
+  // for up to ~30s before declaring it unreachable, exiting early as soon as
+  // the WS connects.
+  const STARTUP_DEADLINE = Date.now() + 30000;
+  let internetSeenOnline = false;
+  while (Date.now() < STARTUP_DEADLINE) {
+    if (state.wsEverConnected || state.serverWs?.readyState === WebSocket.OPEN) return;
+    const r = await checkInternet();
+    if (r.online) internetSeenOnline = true;
+    await new Promise(r => setTimeout(r, 3000));
+  }
+
   if (!state.wsEverConnected && state.serverWs?.readyState !== WebSocket.OPEN) {
-    log('warn', '[net] server unreachable after startup — entering AP mode');
+    log('warn', `[net] server unreachable after 45s (internet ${internetSeenOnline ? 'reached during retry' : 'never reachable'}) — entering AP mode`);
     await enterApMode();
   }
 }
