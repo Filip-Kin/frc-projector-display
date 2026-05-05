@@ -30,6 +30,11 @@ export function handleDevice(ws: WebSocket) {
         outputs: msg.outputs ?? [],
         kind,
         lastSeen: Date.now(),
+        version: msg.version,
+        hostname: msg.hostname,
+        bootTimeMs: msg.bootTimeMs,
+        outputModes: msg.outputModes ?? {},
+        hasInternet: true,
       });
       console.log(`[device] registered PIN ${pin} kind=${kind} outputs=${(msg.outputs ?? []).map(o => o.id).join(',') || '(none)'}`);
       const ctrl = controllers.get(pin);
@@ -40,7 +45,10 @@ export function handleDevice(ws: WebSocket) {
       const d = devices.get(pin);
       if (d) {
         d.lastSeen = Date.now();
-        if (msg.version) d.version = msg.version;
+        if (msg.version)     d.version     = msg.version;
+        if (msg.hostname)    d.hostname    = msg.hostname;
+        if (msg.bootTimeMs)  d.bootTimeMs  = msg.bootTimeMs;
+        if (msg.outputModes) d.outputModes = msg.outputModes;
         if (msg.hasInternet !== undefined) d.hasInternet = msg.hasInternet;
       }
 

@@ -1,3 +1,4 @@
 node_modules/
 .env
 *.log
+installer/frc-display-installer.iso

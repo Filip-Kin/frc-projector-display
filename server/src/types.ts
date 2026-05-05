@@ -12,6 +12,17 @@ export interface Metrics {
   net: { iface: string; rxKBps: number; txKBps: number };
 }
 
+export interface OutputModeRecord {
+  mode: 'home' | 'chromium' | 'ndi' | 'queuing';
+  url?: string;
+  source?: string;
+  bandwidth?: 'high' | 'low';
+  eventKey?: string;
+  streamType?: 'youtube' | 'ndi';
+  streamSource?: string;
+  streamSize?: number;
+}
+
 export interface DeviceState {
   ws: WebSocket;
   ndiSources: NdiSource[];
@@ -25,6 +36,9 @@ export interface DeviceState {
   lastSeen: number;
   version?: string;
   hasInternet?: boolean;
+  hostname?: string;
+  bootTimeMs?: number;
+  outputModes?: { [outputId: string]: OutputModeRecord };
 }
 
 export type NdiSource = string | { label: string; value: string };
@@ -60,6 +74,9 @@ export interface WsMessage {
   ts?: number;
   version?: string;
   hasInternet?: boolean;
+  hostname?: string;
+  bootTimeMs?: number;
+  outputModes?: { [outputId: string]: OutputModeRecord };
   ndiSources?: NdiSource[];
   audioSinks?: AudioSink[];
   audioState?: AudioState;

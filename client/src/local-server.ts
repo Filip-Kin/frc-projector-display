@@ -9,7 +9,8 @@ import { WebSocket } from 'ws';
 import { state, isAnyNdiActive } from './state.js';
 import { cdpNavigateAll } from './cdp.js';
 import { stopAp, startAp, connectWifi, scanWifi, checkInternet } from './wifi.js';
-import { getEthernetInterface, getEthernetStatus, applyDhcp, applyCustomStaticIp } from './network.js';
+import { getEthernetInterface, getEthernetStatus, applyDhcp, applyCustomStaticIp, getActiveNetSummary } from './network.js';
+import { hostname as osHostname } from 'os';
 import { stopNdiOnOutput, stopVnc } from './modes.js';
 import { startImprov, stopImprov } from './improv.js';
 import { startUsbWatcher, stopUsbWatcher } from './usb-provisioning.js';
@@ -135,7 +136,16 @@ app.get('/', async (req, res) => {
   // Single source of truth so the daemon and the /lite browser kiosk look
   // identical. WS being up implies internet, so the public server is
   // reachable; offline kiosks never hit this route (they go to /connecting).
-  res.redirect(302, `${SERVER_BASE}/qr?pin=${encodeURIComponent(PIN)}&version=${encodeURIComponent(VERSION)}`);
+  const net = await getActiveNetSummary().catch(() => ({ ip: null, ethernet: null, wifi: null }));
+  const params = new URLSearchParams({
+    pin: PIN,
+    version: VERSION,
+    hostname: osHostname(),
+  });
+  if (net.ip)       params.set('ip', net.ip);
+  if (net.wifi)     params.set('wifi', net.wifi);
+  if (net.ethernet) params.set('ethernet', net.ethernet);
+  res.redirect(302, `${SERVER_BASE}/qr?${params.toString()}`);
 });
 
 app.get('/youtube', async (req, res) => {

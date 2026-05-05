@@ -1,0 +1,14 @@
+[Unit]
+Description=FRC Display first-boot setup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=!/var/lib/frc-firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/frc-firstboot
+RemainAfterExit=true
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
 import { execFile } from 'child_process';
+import { hostname as osHostname } from 'os';
 import { state, isAnyNdiActive } from './state.js';
 import { cdpNavigate, cdpNavigateAll } from './cdp.js';
 import {
@@ -24,6 +25,8 @@ const VERSION      = (await import('../package.json')).version;
 const SERVER_BASE  = process.env.SERVER_URL ?? 'https://display.filipkin.com';
 const SERVER_URL   = SERVER_BASE.replace(/^https?:\/\//, m => m === 'https://' ? 'wss://' : 'ws://');
 const INSTALL_DIR  = process.env.INSTALL_DIR ?? '/opt/frc-projector-display/client';
+const HOSTNAME     = osHostname();
+const BOOT_TIME_MS = Date.now() - Math.floor(process.uptime() * 1000);
 
 const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function generatePin() {
@@ -146,6 +149,12 @@ function outputsForRegister() {
   return state.outputs.map(o => ({ id: o.id, width: o.width, height: o.height }));
 }
 
+// Snapshot of what each output is currently showing — sent in heartbeats so
+// the admin panel can display "currently showing X" without a separate query.
+function currentOutputModes() {
+  return getPersistedOutputs();
+}
+
 function connectToServer() {
   const wsUrl = `${SERVER_URL}/ws/device`;
   log('info', `[ws] connecting to ${wsUrl}`);
@@ -182,7 +191,14 @@ function connectToServer() {
       await restoreOutputs();
     }
 
-    state.serverWs!.send(JSON.stringify({ type: 'register', pin: PIN, outputs: outputsForRegister() }));
+    state.serverWs!.send(JSON.stringify({
+      type: 'register', pin: PIN,
+      outputs: outputsForRegister(),
+      hostname: HOSTNAME,
+      bootTimeMs: BOOT_TIME_MS,
+      version: VERSION,
+      outputModes: currentOutputModes(),
+    }));
 
     let pongReceived = true;
     let pingTick = 0;
@@ -197,7 +213,15 @@ function connectToServer() {
       }
       pongReceived = false;
       ws.ping();
-      if (++pingTick % 6 === 0) ws.send(JSON.stringify({ type: 'heartbeat', version: VERSION }));
+      if (++pingTick % 6 === 0) ws.send(JSON.stringify({
+        type: 'heartbeat',
+        version: VERSION,
+        hostname: HOSTNAME,
+        bootTimeMs: BOOT_TIME_MS,
+        // We're sending over the WS — by definition the server is reachable.
+        hasInternet: true,
+        outputModes: currentOutputModes(),
+      }));
     }, 5000);
 
     const sendNdi = async () => {

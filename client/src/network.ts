@@ -46,6 +46,35 @@ export function applyDhcp(iface: string): Promise<void> {
   });
 }
 
+// Snapshot of "what should the QR screen show under the QR code" — the
+// active connection's iface, primary IPv4, and (if wifi) the SSID.
+export interface ActiveNetSummary {
+  ip: string | null;
+  ethernet: string | null;
+  wifi: string | null;
+}
+export function getActiveNetSummary(): Promise<ActiveNetSummary> {
+  return new Promise((resolve) => {
+    exec('nmcli -t -f NAME,DEVICE,TYPE,STATE c show --active 2>/dev/null', (_e, stdout) => {
+      const rows = (stdout || '').split('\n').map(l => l.split(':'))
+        .filter(c => c[3] === 'activated' && c[1] && c[1] !== 'lo');
+      const wifi = rows.find(c => c[2] === '802-11-wireless');
+      const eth  = rows.find(c => c[2] === '802-3-ethernet');
+      const pick = wifi ?? eth;
+      if (!pick) { resolve({ ip: null, ethernet: null, wifi: null }); return; }
+      const dev = pick[1];
+      exec(`ip -4 addr show ${dev} 2>/dev/null`, (_e2, out2) => {
+        const ip = out2.match(/inet (\d+\.\d+\.\d+\.\d+)/)?.[1] ?? null;
+        resolve({
+          ip,
+          ethernet: eth ? eth[1] : null,
+          wifi: wifi ? pick[0] : null,
+        });
+      });
+    });
+  });
+}
+
 // Set a user-specified static IP (from setup page)
 export function applyCustomStaticIp(iface: string, ip: string, prefix: string, gateway: string): Promise<void> {
   return new Promise((resolve, reject) => {
