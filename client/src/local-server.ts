@@ -394,6 +394,12 @@ export async function applyCredentials(
     // its close event never firing, so the existing reconnect loop never
     // schedules. forceWsReconnect removes listeners, calls terminate, and
     // calls connectToServer directly to start a fresh connection.
+    //
+    // Flag the kiosks for restoration BEFORE forceWsReconnect so the new
+    // connection's on('open') sees it and calls restoreOutputs — without
+    // this, the kiosks stay on the AP/connecting page indefinitely because
+    // hasReplayedOnce is true and apMode is already cleared.
+    state.kiosksShowingConnecting = true;
     state.forceWsReconnect?.();
     // Don't await; runPostConnect can take ~minutes (update + restart).
     runPostConnect();
@@ -440,11 +446,6 @@ export async function runPostConnect() {
     // device-to-server WS hasn't actually reconnected yet. Show the connecting
     // spinner and let the WS-open handler in daemon.ts navigate to / when the
     // server hand-shake completes.
-    // Mark kiosksShowingConnecting=true so on('open') knows to restore us
-    // away from /connecting once WS handshakes — without this, hasReplayedOnce
-    // is already true and apMode is already cleared, so needRestore is false
-    // and the kiosk sits on /connecting forever.
-    state.kiosksShowingConnecting = true;
     await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
     state.postConnectInProgress = false;
   }
@@ -808,6 +809,21 @@ function buildConnectingPage() {
   <div class="spinner"></div>
   <h1>Connecting to server…</h1>
   <div class="version">v${VERSION}</div>
+<script>
+// Self-heal: poll the daemon's connectivity status. As soon as it reports
+// online, navigate to '/' which redirects to the server-rendered QR page.
+// Belt-and-suspenders against the daemon failing to navigate us back from
+// here — if the WS is up the kiosk shouldn't sit on this spinner forever.
+async function check() {
+  try {
+    const r = await fetch('/api/internet-status', { cache: 'no-store' });
+    const j = await r.json();
+    if (j && j.online) { location.replace('/'); return; }
+  } catch {}
+}
+setInterval(check, 3000);
+check();
+</script>
 </body></html>`;
 }
 
