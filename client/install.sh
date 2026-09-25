@@ -305,24 +305,30 @@ nmcli -t -f NAME,TYPE con show | awk -F: '$2=="802-11-wireless"{print $1}' | whi
   nmcli con delete "$N" 2>&1 | sed 's/^/  /'
 done
 
+# IPv4 is required (may-fail no) so a DHCP timeout fails the activation
+# instead of leaving an IPv6-only link, and the timeout is short enough that
+# the AV fallback below still fits inside the daemon's handoff timeout.
+IP4_OPTS="ipv4.may-fail no ipv4.dhcp-timeout 25"
+
 log "nmcli device wifi rescan"
 nmcli device wifi rescan 2>&1 | sed 's/^/  /' || true
 
 if [ -z "$PASS" ]; then
   log "nmcli con add (open network)"
   nmcli con add type wifi ifname "$IFACE" con-name "$SSID" ssid "$SSID" \
-    802-11-wireless.powersave 2 2>&1 | sed 's/^/  /'
+    802-11-wireless.powersave 2 $IP4_OPTS 2>&1 | sed 's/^/  /'
 else
   log "nmcli con add (WPA-PSK)"
   nmcli con add type wifi ifname "$IFACE" con-name "$SSID" ssid "$SSID" \
     wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PASS" \
-    802-11-wireless.powersave 2 2>&1 | sed 's/^/  /'
+    802-11-wireless.powersave 2 $IP4_OPTS 2>&1 | sed 's/^/  /'
 fi
 
 log "nmcli con up"
 T0=$(date +%s%N)
-nmcli con up "$SSID" 2>&1 | sed 's/^/  /'
-RC=${PIPESTATUS[0]}
+UP_OUT=$(nmcli con up "$SSID" 2>&1)
+RC=$?
+echo "$UP_OUT" | sed 's/^/  /'
 T1=$(date +%s%N)
 log "nmcli con up took $(( (T1-T0)/1000000 ))ms rc=$RC"
 if [ "$RC" -ne 0 ]; then
@@ -330,6 +336,27 @@ if [ "$RC" -ne 0 ]; then
   ip -br addr show "$IFACE" 2>&1 | sed 's/^/  /'
   log "post-mortem: nm device status"
   nmcli -t device show "$IFACE" 2>&1 | grep -E 'GENERAL|IP4|STATE' | sed 's/^/  /'
+  # Associated but DHCP never answered. Event AV networks (192.168.25.0/24,
+  # the same subnet the ethernet field-static fallback uses) often have no
+  # DHCP server, so take a static address there instead of failing. No
+  # gateway and never-default, so an ethernet uplink keeps the default
+  # route. Wrong-password failures do not match and still exit here.
+  if echo "$UP_OUT" | grep -qiE 'IP configuration|ip-config-unavailable'; then
+    for TRY in 1 2 3; do
+      AV_IP="192.168.25.$(( 150 + RANDOM % 101 ))"
+      log "no DHCP: AV static fallback $AV_IP/24 (try $TRY/3)"
+      nmcli con modify "$SSID" ipv4.method manual ipv4.addresses "$AV_IP/24" \
+        ipv4.gateway "" ipv4.never-default yes ipv4.dad-timeout 2000 \
+        ipv6.method ignore 2>&1 | sed 's/^/  /'
+      nmcli con up "$SSID" 2>&1 | sed 's/^/  /'
+      if [ "${PIPESTATUS[0]}" -eq 0 ]; then
+        log "OK AV static $AV_IP up; no internet probe on this link"
+        ip -br addr show "$IFACE" 2>&1 | sed 's/^/  /'
+        exit 0
+      fi
+    done
+    log "ERR AV static fallback failed"
+  fi
   exit "$RC"
 fi
 

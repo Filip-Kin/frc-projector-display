@@ -68,7 +68,8 @@ export function connectWifi(ssid: string, password: string): Promise<void> {
   // race the split was creating.
   return new Promise((resolve, reject) => {
     execFile('sudo', ['/usr/local/bin/frc-handoff', ssid, password || ''],
-      { timeout: 60000 }, (err, stdout, stderr) => {
+      // 90s: up to 25s DHCP timeout, then up to three AV static attempts.
+      { timeout: 90000 }, (err, stdout, stderr) => {
         const out = (stdout || '').trim(), errOut = (stderr || '').trim();
         if (out)    console.log(`[handoff]\n${out}`);
         if (errOut) console.error(`[handoff stderr]\n${errOut}`);
