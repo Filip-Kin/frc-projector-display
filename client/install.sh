@@ -621,6 +621,22 @@ cat > /etc/systemd/logind.conf.d/power-button.conf << 'EOF'
 [Login]
 HandlePowerKey=poweroff
 EOF
+
+# ── Never suspend ─────────────────────────────────────────────────────────────
+# xset above only stops X blanking. The distro can still suspend the whole box
+# on idle or lid close, and on resume LightDM shows its greeter, which the
+# passwordless kiosk user cannot get past. Mask every sleep target outright.
+echo "[15] Disabling suspend and hibernate..."
+cat > /etc/systemd/logind.conf.d/no-sleep.conf << 'EOF'
+[Login]
+IdleAction=ignore
+HandleSuspendKey=ignore
+HandleHibernateKey=ignore
+HandleLidSwitch=ignore
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
+EOF
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target 2>/dev/null || true
 systemctl restart systemd-logind 2>/dev/null || true
 
 echo ""
