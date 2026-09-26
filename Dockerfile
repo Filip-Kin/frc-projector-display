@@ -7,6 +7,8 @@ RUN bun install --production
 
 # ── Client source (bundled for self-hosted distribution) ─────────────────────
 COPY client/ ./client-dist/
+# Bundle the controller page so the daemon can serve it offline
+COPY server/public/control.html ./client-dist/public/control.html
 
 # ── Server source + public ────────────────────────────────────────────────────
 COPY server/src/ ./src/

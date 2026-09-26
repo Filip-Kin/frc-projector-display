@@ -28,7 +28,8 @@ import { initOutputs, setOnOutputsChanged } from './outputs.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
 import { localServer, httpsServer, LOCAL_PORT, enterApMode, initServer, stopProvisioningExtras } from './local-server.js';
-import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp } from './network.js';
+import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp, hasLocalLink } from './network.js';
+import { emit, initLocalControl, attachLocalControl, hasLocalControllers } from './control.js';
 import { checkInternet } from './wifi.js';
 import { startNetworkMonitor } from './network-monitor.js';
 import { sampleMetrics } from './metrics.js';
@@ -72,6 +73,14 @@ export function log(level: 'info' | 'warn' | 'error', msg: string) {
 
 // ── Audio polling ─────────────────────────────────────────────────────────────
 let audioReplayed = false;
+let audioPollStarted = false;
+
+// Last values sent to controllers, replayed to a local controller the moment
+// it connects (the public server keeps its own copy for remote ones).
+let lastNdiSources: unknown[] = [];
+let lastAudioSinks: unknown[] = [];
+let lastAudioState: unknown = { sink: '', volume: 100, muted: false };
+let lastMetrics: unknown = undefined;
 function pollAudioSinks(attempt = 0) {
   const delay = attempt === 0 ? 5000 : 15000;
   setTimeout(async () => {
@@ -97,16 +106,14 @@ function pollAudioSinks(attempt = 0) {
         astState = await getAudioState();
       }
 
-      if (state.serverWs?.readyState === WebSocket.OPEN)
-        state.serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state: astState }));
+      lastAudioSinks = sinks; lastAudioState = astState;
+      emit({ type: 'audio_sinks', sinks, state: astState });
     } catch { pollAudioSinks(attempt + 1); }
   }, delay);
 }
 
 // ── Server WebSocket ──────────────────────────────────────────────────────────
 let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-let ndiPollInterval:   ReturnType<typeof setInterval> | null = null;
-let metricsInterval:   ReturnType<typeof setInterval> | null = null;
 let connectingNavTimer: ReturnType<typeof setTimeout> | null = null;
 let hasReplayedOnce = false;
 
@@ -156,8 +163,6 @@ state.forceWsReconnect = () => {
     state.serverWs = null;
   }
   if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
-  if (ndiPollInterval)   { clearInterval(ndiPollInterval);   ndiPollInterval   = null; }
-  if (metricsInterval)   { clearInterval(metricsInterval);   metricsInterval   = null; }
   state.reconnectDelay = 1000;
   connectToServer();
 };
@@ -170,6 +175,80 @@ function outputsForRegister() {
 // the admin panel can display "currently showing X" without a separate query.
 function currentOutputModes() {
   return getPersistedOutputs();
+}
+
+// Controller commands, from the server relay or a local controller.
+async function handleCommand(msg: any) {
+  log('info', `[cmd] ${msg.type}${msg.output ? ` output=${msg.output}` : ''}`);
+  switch (msg.type) {
+    case 'set_mode': {
+      // Without an explicit output, fall through to first output (controllers
+      // that don't yet know about multi-output keep working).
+      const outputId: string = msg.output ?? state.outputs[0]?.id;
+      if (!outputId) { log('warn', '[ws] set_mode but no outputs available'); break; }
+
+      if (msg.mode === 'home') {
+        await setHomeOnOutput(outputId);
+        recordOutputMode(outputId, { mode: 'home' });
+      } else if (msg.mode === 'chromium' && msg.url) {
+        await setChromiumOnOutput(outputId, msg.url);
+        recordOutputMode(outputId, { mode: 'chromium', url: msg.url });
+      } else if (msg.mode === 'ndi' && msg.source) {
+        if ((msg.source as string).startsWith('omt://')) {
+          emit({ type: 'error', message: 'OMT playback is not yet supported on Linux. NDI from the same source works fine.' });
+        } else {
+          setNdiOnOutput(outputId, msg.source, msg.bandwidth ?? 'high');
+          recordOutputMode(outputId, { mode: 'ndi', source: msg.source, bandwidth: msg.bandwidth ?? 'high' });
+        }
+      } else if (msg.mode === 'queuing' && msg.eventKey) {
+        const streamType = msg.streamType === 'ndi' ? 'ndi' : 'youtube';
+        const streamSize = msg.streamSize === 60 ? 60 : 70;
+        const sidebar    = msg.sidebar ?? 'matches';
+        const bottom     = msg.bottom  ?? 'updates';
+        await setQueuingOnOutput(
+          outputId, msg.eventKey, streamType,
+          msg.streamSource ?? '', streamSize, sidebar, bottom,
+        );
+        recordOutputMode(outputId, {
+          mode: 'queuing', eventKey: msg.eventKey,
+          streamType, streamSource: msg.streamSource ?? '',
+          streamSize, sidebar, bottom,
+        });
+      }
+      break;
+    }
+    case 'refresh_ndi': {
+      await refreshNdiSources();
+      break;
+    }
+    case 'start_vnc_bridge':
+      // The VNC bridge rides the server connection; there is no local
+      // equivalent, so a local controller hides the button.
+      if (state.serverWs?.readyState === WebSocket.OPEN) setVnc(state.serverWs);
+      break;
+    // No vnc_upstream_closed handler: bridge tearing down is terminal.
+    // A new viewer triggers a fresh start_vnc_bridge.
+    case 'set_audio_output':
+      if (msg.sink) {
+        recordAudio({ sink: msg.sink });
+        setAudioOutput(msg.sink).then(async () => {
+          lastAudioSinks = await getAudioSinks();
+          lastAudioState = await getAudioState();
+          emit({ type: 'audio_sinks', sinks: lastAudioSinks, state: lastAudioState });
+        }).catch(() => {});
+      }
+      break;
+    case 'set_volume': {
+      const vol = Math.max(0, Math.min(100, parseInt(msg.volume) || 0));
+      recordAudio({ volume: vol });
+      execFile('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${vol}%`], { env: process.env }, () => {});
+      break;
+    }
+    case 'set_mute':
+      recordAudio({ muted: !!msg.muted });
+      execFile('pactl', ['set-sink-mute', '@DEFAULT_SINK@', msg.muted ? '1' : '0'], { env: process.env }, () => {});
+      break;
+  }
 }
 
 function connectToServer() {
@@ -255,113 +334,26 @@ function connectToServer() {
       }));
     }, 5000);
 
-    const sendNdi = async () => {
-      const sources = await getNdiSources();
-      if (state.serverWs?.readyState === WebSocket.OPEN)
-        state.serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
-    };
-    sendNdi();
-    ndiPollInterval = setInterval(sendNdi, 20000);
-
+    // Server keeps its own copy for remote controllers; push the current
+    // values now rather than waiting for the next poll tick.
+    emit({ type: 'ndi_sources', sources: lastNdiSources });
+    if (lastMetrics) emit({ type: 'metrics', metrics: lastMetrics });
+    // Re-scan sinks on every connect (a monitor may have been plugged in);
+    // the persisted audio settings are only replayed once per process.
+    audioPollStarted = true;
     pollAudioSinks();
-
-    // System metrics every 5s — server forwards to controller if one is open,
-    // drops otherwise. Tiny payload, no special gating needed.
-    const sendMetrics = async () => {
-      try {
-        const metrics = await sampleMetrics();
-        if (state.serverWs?.readyState === WebSocket.OPEN)
-          state.serverWs.send(JSON.stringify({ type: 'metrics', metrics }));
-      } catch {}
-    };
-    sendMetrics();
-    metricsInterval = setInterval(sendMetrics, 5000);
   });
 
   state.serverWs.on('message', async (data) => {
     let msg: any;
     try { msg = JSON.parse(data.toString()); } catch { return; }
-    log('info', `[ws] command: ${msg.type}${msg.output ? ` output=${msg.output}` : ''}`);
-
-    switch (msg.type) {
-      case 'set_mode': {
-        // Without an explicit output, fall through to first output (controllers
-        // that don't yet know about multi-output keep working).
-        const outputId: string = msg.output ?? state.outputs[0]?.id;
-        if (!outputId) { log('warn', '[ws] set_mode but no outputs available'); break; }
-
-        if (msg.mode === 'home') {
-          await setHomeOnOutput(outputId);
-          recordOutputMode(outputId, { mode: 'home' });
-        } else if (msg.mode === 'chromium' && msg.url) {
-          await setChromiumOnOutput(outputId, msg.url);
-          recordOutputMode(outputId, { mode: 'chromium', url: msg.url });
-        } else if (msg.mode === 'ndi' && msg.source) {
-          if ((msg.source as string).startsWith('omt://')) {
-            if (state.serverWs?.readyState === WebSocket.OPEN)
-              state.serverWs.send(JSON.stringify({ type: 'error', message: 'OMT playback is not yet supported on Linux. NDI from the same source works fine.' }));
-          } else {
-            setNdiOnOutput(outputId, msg.source, msg.bandwidth ?? 'high');
-            recordOutputMode(outputId, { mode: 'ndi', source: msg.source, bandwidth: msg.bandwidth ?? 'high' });
-          }
-        } else if (msg.mode === 'queuing' && msg.eventKey) {
-          const streamType = msg.streamType === 'ndi' ? 'ndi' : 'youtube';
-          const streamSize = msg.streamSize === 60 ? 60 : 70;
-          const sidebar    = msg.sidebar ?? 'matches';
-          const bottom     = msg.bottom  ?? 'updates';
-          await setQueuingOnOutput(
-            outputId, msg.eventKey, streamType,
-            msg.streamSource ?? '', streamSize, sidebar, bottom,
-          );
-          recordOutputMode(outputId, {
-            mode: 'queuing', eventKey: msg.eventKey,
-            streamType, streamSource: msg.streamSource ?? '',
-            streamSize, sidebar, bottom,
-          });
-        }
-        break;
-      }
-      case 'refresh_ndi': {
-        const sources = await getNdiSources();
-        if (state.serverWs?.readyState === WebSocket.OPEN)
-          state.serverWs.send(JSON.stringify({ type: 'ndi_sources', sources }));
-        break;
-      }
-      case 'start_vnc_bridge':
-        setVnc(state.serverWs!);
-        break;
-      // No vnc_upstream_closed handler: bridge tearing down is terminal.
-      // A new viewer triggers a fresh start_vnc_bridge.
-      case 'set_audio_output':
-        if (msg.sink) {
-          recordAudio({ sink: msg.sink });
-          setAudioOutput(msg.sink).then(async () => {
-            const sinks = await getAudioSinks();
-            const astState = await getAudioState();
-            if (state.serverWs?.readyState === WebSocket.OPEN)
-              state.serverWs.send(JSON.stringify({ type: 'audio_sinks', sinks, state: astState }));
-          }).catch(() => {});
-        }
-        break;
-      case 'set_volume': {
-        const vol = Math.max(0, Math.min(100, parseInt(msg.volume) || 0));
-        recordAudio({ volume: vol });
-        execFile('pactl', ['set-sink-volume', '@DEFAULT_SINK@', `${vol}%`], { env: process.env }, () => {});
-        break;
-      }
-      case 'set_mute':
-        recordAudio({ muted: !!msg.muted });
-        execFile('pactl', ['set-sink-mute', '@DEFAULT_SINK@', msg.muted ? '1' : '0'], { env: process.env }, () => {});
-        break;
-    }
+    await handleCommand(msg);
   });
 
   state.serverWs.on('close', () => {
     log('warn', `[ws] disconnected — reconnecting in ${state.reconnectDelay}ms`);
     if (heartbeatInterval) { clearInterval(heartbeatInterval); heartbeatInterval = null; }
-    if (ndiPollInterval)   { clearInterval(ndiPollInterval);   ndiPollInterval   = null; }
-    if (metricsInterval)   { clearInterval(metricsInterval);   metricsInterval   = null; }
-    setTimeout(connectToServer, state.reconnectDelay);
+        setTimeout(connectToServer, state.reconnectDelay);
     state.reconnectDelay = Math.min(state.reconnectDelay * 1.5, 30000);
 
     if (state.wsEverConnected && !state.networkCheckTimer) {
@@ -370,10 +362,12 @@ function connectToServer() {
       // (Coolify) finish in under 30s, and slamming kiosks to /connecting for
       // a 10s blip is more disruptive than the disconnect itself.
       if (!ndiActive && !state.apMode && !connectingNavTimer) {
-        connectingNavTimer = setTimeout(() => {
+        connectingNavTimer = setTimeout(async () => {
           connectingNavTimer = null;
           if (state.serverWs?.readyState === WebSocket.OPEN) return;
           if (state.apMode || isAnyNdiActive()) return;
+          // Still on a network: outputs keep what they show, controllable locally.
+          if (await hasLocalLink()) return;
           state.kiosksShowingConnecting = true;
           cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
         }, 15000);
@@ -392,6 +386,7 @@ function connectToServer() {
           log('info', '[ws] connection lost but applyCredentials running; deferring AP mode');
           return;
         }
+        if (await stayOfflineIfLinked('server connection lost')) return;
         await enterApMode();
       }, 30000);
     }
@@ -402,6 +397,28 @@ function connectToServer() {
 
 
 let apCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function refreshNdiSources() {
+  lastNdiSources = await getNdiSources();
+  emit({ type: 'ndi_sources', sources: lastNdiSources });
+}
+
+// Offline mode. The box has an address on some network but cannot reach the
+// server: an AV VLAN, a venue LAN with no uplink, a laptop on a direct cable.
+// Play the saved outputs and stay put; a local controller can reach it at
+// http://<host>.local:3000/control. The setup hotspot is only for a box with
+// no network at all.
+async function stayOfflineIfLinked(why: string): Promise<boolean> {
+  if (!(await hasLocalLink())) return false;
+  log('info', `[net] ${why}, but a local network is up; staying on it (offline mode)`);
+  if (!hasReplayedOnce || state.kiosksShowingConnecting) {
+    hasReplayedOnce = true;
+    state.kiosksShowingConnecting = false;
+    await restoreOutputs();
+  }
+  if (!audioPollStarted) { audioPollStarted = true; pollAudioSinks(); }
+  return true;
+}
 
 async function runNetworkStartup() {
   await new Promise(r => setTimeout(r, 15000));
@@ -428,6 +445,10 @@ async function runNetworkStartup() {
   // late, then DNS+TLS+WS handshake adds a few more seconds. Probe the server
   // for up to ~30s before declaring it unreachable, exiting early as soon as
   // the WS connects.
+  if (!state.wsEverConnected && state.serverWs?.readyState !== WebSocket.OPEN) {
+    await stayOfflineIfLinked('server not reached 15s after boot');
+  }
+
   const STARTUP_DEADLINE = Date.now() + 30000;
   let internetSeenOnline = false;
   while (Date.now() < STARTUP_DEADLINE) {
@@ -438,17 +459,34 @@ async function runNetworkStartup() {
   }
 
   if (!state.wsEverConnected && state.serverWs?.readyState !== WebSocket.OPEN) {
-    log('warn', `[net] server unreachable after 45s (internet ${internetSeenOnline ? 'reached during retry' : 'never reachable'}) — entering AP mode`);
+    log('warn', `[net] server unreachable after 45s (internet ${internetSeenOnline ? 'reached during retry' : 'never reachable'})`);
+    if (await stayOfflineIfLinked('server unreachable')) return;
     await enterApMode();
   }
 }
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 setOnOutputsChanged(() => {
-  if (state.serverWs?.readyState === WebSocket.OPEN) {
-    state.serverWs.send(JSON.stringify({ type: 'outputs_changed', outputs: outputsForRegister() }));
-  }
+  emit({ type: 'outputs_changed', outputs: outputsForRegister() });
 });
+
+initLocalControl(PIN, handleCommand, () => ({
+  outputs: outputsForRegister(),
+  ndiSources: lastNdiSources,
+  audioSinks: lastAudioSinks,
+  audioState: lastAudioState,
+  metrics: lastMetrics,
+}));
+attachLocalControl([localServer, httpsServer]);
+
+// NDI discovery and metrics run whether or not the server is reachable, so a
+// local controller sees live sources on a network with no internet.
+setInterval(refreshNdiSources, 20000);
+setTimeout(refreshNdiSources, 5000);
+setInterval(async () => {
+  if (state.serverWs?.readyState !== WebSocket.OPEN && !hasLocalControllers()) return;
+  try { lastMetrics = await sampleMetrics(); emit({ type: 'metrics', metrics: lastMetrics }); } catch {}
+}, 5000);
 await initOutputs();
 log('info', `[outputs] initialised ${state.outputs.length} output(s): ${state.outputs.map(o => o.id).join(', ')}`);
 
@@ -504,6 +542,14 @@ startNetworkMonitor(async (hasRoute, reason) => {
     return;
   }
 
+  // No default route is normal on an AV network (static address, no
+  // gateway). Only treat it as "offline" when there is no address at all.
+  if (await hasLocalLink()) {
+    log('info', '[net] no default route but a local network is up; staying on it');
+    await stayOfflineIfLinked('no default route');
+    return;
+  }
+
   if (routeMissingSince === null) {
     routeMissingSince = Date.now();
     log('warn', '[net] route DOWN — showing connecting screen, trying saved wifi');
@@ -515,9 +561,12 @@ startNetworkMonitor(async (hasRoute, reason) => {
     routeOfflineTimer = setTimeout(() => {
       routeOfflineTimer = null;
       routeMissingSince = null;
-      log('warn', '[net] route still DOWN after 12s — entering AP mode');
-      try { state.serverWs?.terminate(); } catch {}
-      enterApMode().catch(err => log('error', `[net] enterApMode failed: ${err.message}`));
+      log('warn', '[net] route still DOWN after 12s');
+      stayOfflineIfLinked('route down 12s').then(stayed => {
+        if (stayed) return;
+        try { state.serverWs?.terminate(); } catch {}
+        return enterApMode();
+      }).catch(err => log('error', `[net] enterApMode failed: ${err.message}`));
     }, 12000);
   }
 });

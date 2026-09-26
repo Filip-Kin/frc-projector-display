@@ -9,7 +9,7 @@ import { WebSocket } from 'ws';
 import { state, isAnyNdiActive } from './state.js';
 import { cdpNavigateAll } from './cdp.js';
 import { stopAp, startAp, connectWifi, scanWifi, checkInternet } from './wifi.js';
-import { getEthernetInterface, getEthernetStatus, applyDhcp, applyCustomStaticIp, getActiveNetSummary } from './network.js';
+import { getEthernetInterface, getEthernetStatus, applyDhcp, applyCustomStaticIp, getActiveNetSummary, getLocalAddresses, hasLocalLink } from './network.js';
 import { hostname as osHostname } from 'os';
 import { stopNdiOnOutput, stopVnc } from './modes.js';
 import { startImprov, stopImprov } from './improv.js';
@@ -132,10 +132,15 @@ app.get('/', async (req, res) => {
     }
     return res.send(await buildApPageAsync());
   }
+  // Server unreachable (offline mode): render the QR page here, pointing at
+  // this box's own controller instead of the public one.
+  if (state.serverWs?.readyState !== WebSocket.OPEN) {
+    return res.send(await buildLocalQrPage());
+  }
   // Not in AP mode — redirect the kiosk to the server-rendered QR page.
   // Single source of truth so the daemon and the /lite browser kiosk look
   // identical. WS being up implies internet, so the public server is
-  // reachable; offline kiosks never hit this route (they go to /connecting).
+  // reachable.
   const net = await getActiveNetSummary().catch(() => ({ ip: null, ethernet: null, wifi: null }));
   const params = new URLSearchParams({
     pin: PIN,
@@ -238,6 +243,39 @@ ${reloadJs}
 });
 
 app.get('/connecting', (_req, res) => res.send(buildConnectingPage()));
+
+// ── Local controller ─────────────────────────────────────────────────────────
+// Same page the public server serves at /control, bundled into the client
+// tarball at build time. Commands go over this box's own /ws/control
+// (control.ts), so it works on a network with no internet.
+const CONTROL_HTML_PATHS = [
+  path.join(import.meta.dir, '../public/control.html'),
+  path.join(import.meta.dir, '../../server/public/control.html'),   // dev checkout
+];
+app.get('/control', (_req, res) => {
+  const file = CONTROL_HTML_PATHS.find(p => existsSync(p));
+  if (!file) { res.status(404).send('Controller not bundled'); return; }
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(readFileSync(file, 'utf8').replace('<head>', '<head><script>window.FRC_LOCAL=true</script>'));
+});
+
+app.get('/api/server-status', (_req, res) => {
+  res.json({ connected: state.serverWs?.readyState === WebSocket.OPEN });
+});
+
+// The controller's event pickers read these from the public server. Proxy
+// them when it is reachable; offline they come back empty and the page
+// still works for NDI, URLs and audio.
+for (const route of ['/api/webcasts', '/api/nexus/events']) {
+  app.get(route, async (_req, res) => {
+    try {
+      const r = await fetch(`${SERVER_BASE}${route}`, { signal: AbortSignal.timeout(8000) });
+      res.status(r.status).type('application/json').send(await r.text());
+    } catch {
+      res.json([]);
+    }
+  });
+}
 app.get('/no-connection', (_req, res) => res.send(buildNoConnectionPage()));
 app.get('/identify', (_req, res) => res.send(buildIdentifyPage()));
 
@@ -339,6 +377,7 @@ app.get('/setup', async (_req, res) => {
 // so the user can try again.
 type ApplyResult =
   | { kind: 'online' }
+  | { kind: 'local' }
   | { kind: 'captive_portal'; portalUrl: string }
   | { kind: 'error'; message: string };
 
@@ -384,6 +423,18 @@ export async function applyCredentials(
       return { kind: 'captive_portal', portalUrl: result.portalUrl };
     }
     if (!result.online) {
+      // Joined and holding an address, just no internet: an AV network or a
+      // venue LAN with no uplink. Stay on it in offline mode; the saved
+      // outputs play and the controller is reachable on this network.
+      if (await hasLocalLink()) {
+        console.log('[setup] connected with no internet; staying on the local network');
+        state.apIface = null;
+        await stopProvisioningExtras();
+        state.kiosksShowingConnecting = true;
+        state.forceWsReconnect?.();
+        await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/`).catch(() => {});
+        return { kind: 'local' };
+      }
       await restoreAp();
       return { kind: 'error', message: 'Connected to WiFi but no internet; check the password or try again.' };
     }
@@ -415,6 +466,7 @@ app.post('/setup', async (req, res) => {
   // On any success-ish outcome, tear down BLE + USB watcher (still running)
   if (r.kind === 'online' || r.kind === 'captive_portal') await stopProvisioningExtras();
   if (r.kind === 'online')         res.json({ status: 'online' });
+  else if (r.kind === 'local')     res.json({ status: 'local' });
   else if (r.kind === 'captive_portal') res.json({ status: 'captive_portal', portalUrl: r.portalUrl, pin: PIN });
   else                              res.json({ status: 'error', message: r.message });
 });
@@ -428,7 +480,7 @@ export async function runPostConnect() {
   try {
     const checkScript = path.join(import.meta.dir, '../check-update.sh');
     const stdout: string = await new Promise(r => {
-      exec(`/bin/bash "${checkScript}"`, { timeout: 120000, env: process.env }, (_, out) => r(out ?? ''));
+      exec(`/bin/bash "${checkScript}"`, { timeout: 120000, env: { ...process.env, FRC_SKIP_INSTALLER: '1' } }, (_, out) => r(out ?? ''));
     });
     console.log('[update]', stdout.trim());
     updated = stdout.includes('[update] done');
@@ -529,7 +581,7 @@ async function startProvisioningExtras() {
       const r = await applyCredentials(ssid, password, 'improv', async (msg) => {
         await setProvisioningStatus({ source: 'improv', ssid, phase: 'connecting', message: msg });
       });
-      const ok = r.kind === 'online' || r.kind === 'captive_portal';
+      const ok = r.kind === 'online' || r.kind === 'local' || r.kind === 'captive_portal';
       if (!ok) {
         await setProvisioningStatus({ source: 'improv', ssid, phase: 'failed', message: r.kind === 'error' ? r.message : undefined });
         setTimeout(() => { if (state.provisioningStatus?.phase === 'failed') clearProvisioningStatus(); }, 5000);
@@ -560,7 +612,7 @@ async function startProvisioningExtras() {
     const r = await applyCredentials(ssid, password, 'usb', async (msg) => {
       await setProvisioningStatus({ source: 'usb', ssid, phase: 'connecting', message: msg });
     });
-    if (r.kind === 'online' || r.kind === 'captive_portal') {
+    if (r.kind === 'online' || r.kind === 'local' || r.kind === 'captive_portal') {
       await clearProvisioningStatus();
       await stopProvisioningExtras();
     } else {
@@ -735,7 +787,7 @@ function selectNetwork(ssid){document.getElementById('ssid').value=ssid;document
 function togglePw(){const i=document.getElementById('password');const b=event.target;i.type=i.type==='password'?'text':'password';b.textContent=i.type==='password'?'Show':'Hide'}
 async function refreshScan(){const l=document.getElementById('net-list');l.innerHTML='<div style="padding:12px 14px;color:#555">Scanning...</div>';const r=await fetch('/api/wifi-scan').then(r=>r.json()).catch(()=>[]);if(!r.length){l.innerHTML='<div style="padding:12px 14px;color:#555">No networks found</div>';return}l.innerHTML=r.map(n=>\`<div class="net-row" onclick="selectNetwork('\${n.ssid.replace(/'/g,"\\\\'")}')"><span class="bars">\${n.signal>=70?'▂▄▆█':n.signal>=50?'▂▄▆░':n.signal>=30?'▂▄░░':'▂░░░'}</span><span class="net-name">\${n.ssid.replace(/</g,'&lt;')}</span>\${n.secured?'<span class="lock">lock</span>':''}</div>\`).join('')}
 function setStatus(cls,msg){const e=document.getElementById('status');e.className=cls;e.innerHTML=msg}
-async function doConnect(){const ssid=document.getElementById('ssid').value.trim();if(!ssid){setStatus('error','Enter a network name');return}const password=document.getElementById('password').value;setStatus('info','<span class="spinner">o</span> Connecting to <b>'+ssid+'</b>...');document.querySelector('.connect').disabled=true;try{const r=await fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password})}).then(r=>r.json());if(r.status==='online'||r.status==='connected'){setStatus('success','Connected. Display restarting...')}else if(r.status==='captive_portal'){setStatus('info','Venue requires sign-in. Use <a class="vnc-link" href="/vnc/'+r.pin+'" target="_blank">Web VNC</a> to sign in, then <button onclick="pollInternet()" style="margin-top:8px;background:#fa0;color:#000;border:none;border-radius:6px;padding:8px 16px;cursor:pointer">I signed in -&gt; continue</button>')}else{setStatus('error',r.message||'Connection failed');document.querySelector('.connect').disabled=false}}catch(e){setStatus('error','Request failed. Try again.');document.querySelector('.connect').disabled=false}}
+async function doConnect(){const ssid=document.getElementById('ssid').value.trim();if(!ssid){setStatus('error','Enter a network name');return}const password=document.getElementById('password').value;setStatus('info','<span class="spinner">o</span> Connecting to <b>'+ssid+'</b>...');document.querySelector('.connect').disabled=true;try{const r=await fetch('/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password})}).then(r=>r.json());if(r.status==='online'||r.status==='connected'){setStatus('success','Connected. Display restarting...')}else if(r.status==='local'){setStatus('success','Connected. No internet.')}else if(r.status==='captive_portal'){setStatus('info','Venue requires sign-in. Use <a class="vnc-link" href="/vnc/'+r.pin+'" target="_blank">Web VNC</a> to sign in, then <button onclick="pollInternet()" style="margin-top:8px;background:#fa0;color:#000;border:none;border-radius:6px;padding:8px 16px;cursor:pointer">I signed in -&gt; continue</button>')}else{setStatus('error',r.message||'Connection failed');document.querySelector('.connect').disabled=false}}catch(e){setStatus('error','Request failed. Try again.');document.querySelector('.connect').disabled=false}}
 async function pollInternet(){setStatus('info','<span class="spinner">o</span> Checking internet...');for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,2000));const r=await fetch('/api/internet-status').then(r=>r.json()).catch(()=>({}));if(r.online||r.status==='proceeding'){setStatus('success','Connected.');return}}setStatus('error','Still no internet. Try again.')}
 let ethMode='dhcp';
 function setEthMode(m){ethMode=m;document.getElementById('btn-dhcp').style.background=m==='dhcp'?'#333':'#252525';document.getElementById('btn-static').style.background=m==='static'?'#333':'#252525';document.getElementById('eth-static-fields').style.display=m==='static'?'block':'none'}
@@ -794,6 +846,37 @@ async function refresh(){
 }
 refresh();
 setInterval(refresh,1000);
+</script>
+</body></html>`;
+}
+
+async function buildLocalQrPage() {
+  const addrs = await getLocalAddresses().catch(() => []);
+  const host = `${osHostname()}.local`;
+  const primary = addrs[0]?.ip ?? host;
+  const controlUrl = `http://${primary}:${LOCAL_PORT}/control?pin=${PIN}`;
+  const qr = await QRCode.toDataURL(controlUrl, { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
+  const rows = [
+    `<div><span class="ik">host</span> <span class="iv">${host}:${LOCAL_PORT}</span></div>`,
+    ...addrs.map(a => `<div><span class="ik">${a.iface}</span> <span class="iv">${a.ip}</span></div>`),
+  ].join('');
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>FRC Display</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#111;color:#f0f0f0;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;gap:28px}h1{font-size:2.4rem;font-weight:700;letter-spacing:.02em}.badge{font-size:1rem;color:#fa0;letter-spacing:.08em;text-transform:uppercase}.qr-box{background:#fff;padding:16px;border-radius:16px;box-shadow:0 0 60px #fa04}.qr-box img{display:block;width:280px;height:280px}.pin-label{font-size:1rem;color:#aaa;margin-bottom:4px}.pin{font-size:3rem;font-weight:800;letter-spacing:.25em;color:#4af}.url{font-size:.95rem;color:#888;word-break:break-all;text-align:center;max-width:560px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.version{font-size:1rem;color:#777;position:fixed;bottom:12px;right:16px}.info{position:fixed;bottom:12px;left:16px;font-size:.9rem;color:#888;display:flex;flex-direction:column;gap:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.info .ik{display:inline-block;width:5em;color:#555}.info .iv{color:#aaa}</style>
+</head><body>
+<h1>Configure Display</h1>
+<div class="badge">Offline · local control</div>
+<div class="qr-box"><img src="${qr}" alt="QR"></div>
+<div><div class="pin-label">PIN</div><div class="pin">${PIN}</div></div>
+<div class="url">${controlUrl.replace(/\?.*/, '')}</div>
+<div class="info">${rows}</div>
+<div class="version">v${VERSION}</div>
+<script>
+// Back to the server-rendered page as soon as the server is reachable, and
+// re-render every 30s so a changed address shows up.
+setInterval(async () => {
+  try { const j = await (await fetch('/api/server-status', { cache: 'no-store' })).json(); if (j.connected) location.replace('/'); } catch {}
+}, 3000);
+setTimeout(() => location.reload(), 30000);
 </script>
 </body></html>`;
 }

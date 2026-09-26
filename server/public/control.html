@@ -562,7 +562,8 @@ function connect() {
       document.body.classList.remove('ws-offline');
       document.body.classList.toggle('device-lite', msg.kind === 'lite');
       document.getElementById('control-section').style.display = 'block';
-      document.getElementById('vnc-quick-btn').style.display = msg.kind === 'lite' ? 'none' : '';
+      // VNC rides the public server; a controller served by the box itself has no path to it.
+      document.getElementById('vnc-quick-btn').style.display = (msg.kind === 'lite' || msg.local) ? 'none' : '';
       if (msg.outputs) updateOutputs(msg.outputs);
       if (msg.ndiSources) updateNdiSources(msg.ndiSources);
       if (msg.audioSinks) updateAudioSinks(msg.audioSinks, msg.audioState);

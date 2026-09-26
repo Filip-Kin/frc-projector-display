@@ -1,4 +1,6 @@
 import { exec, execFile } from 'child_process';
+import { readFileSync, existsSync } from 'fs';
+import { state } from './state.js';
 
 export interface EthernetStatus {
   iface: string;
@@ -84,4 +86,32 @@ export function applyCustomStaticIp(iface: string, ip: string, prefix: string, g
         else resolve();
       });
   });
+}
+
+// Every usable IPv4 address on a real interface: carrier up, not loopback,
+// not link-local, not the setup hotspot. A non-empty list means the box sits
+// on some network a controller could reach, even with no internet.
+export function getLocalAddresses(): Promise<{ iface: string; ip: string }[]> {
+  const excludeIface = state.apMode ? state.apIface : null;
+  return new Promise((resolve) => {
+    exec('ip -4 -o addr show scope global 2>/dev/null', (_e, stdout) => {
+      const out: { iface: string; ip: string }[] = [];
+      for (const line of (stdout || '').split('\n')) {
+        const m = line.match(/^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+)/);
+        if (!m) continue;
+        const [, iface, ip] = m;
+        if (iface === 'lo' || iface === excludeIface || ip.startsWith('169.254.')) continue;
+        // Physical NICs only (skips docker bridges, veths, tailscale).
+        if (!existsSync(`/sys/class/net/${iface}/device`)) continue;
+        let carrier = false;
+        try { carrier = readFileSync(`/sys/class/net/${iface}/carrier`, 'utf8').trim() === '1'; } catch {}
+        if (carrier) out.push({ iface, ip });
+      }
+      resolve(out);
+    });
+  });
+}
+
+export async function hasLocalLink(): Promise<boolean> {
+  return (await getLocalAddresses()).length > 0;
 }

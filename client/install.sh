@@ -9,6 +9,12 @@
 
 set -e
 
+# Bump when this script changes in a way installed boxes need. check-update.sh
+# compares it with /etc/frc-display/install-rev at boot and re-runs the
+# installer (frc-install) when it is newer, so helper-script and system fixes
+# reach boxes already in the field, not just new installs.
+INSTALL_REV=1
+
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/frc-projector-display/client}"
@@ -369,6 +375,13 @@ ip route show dev "$IFACE" 2>&1 | sed 's/^/  /'
 # packets for 25-35s. We need to wait until externally-routed traffic
 # actually flows, otherwise the daemon's checkInternet to display.filipkin.com
 # fails and the user sees provisioning fail despite a "successful" associate.
+# No default route on this link (DHCP gave no gateway): a local-only network.
+# Nothing to probe; the daemon runs it in offline mode.
+if ! ip route show default dev "$IFACE" 2>/dev/null | grep -q .; then
+  log "OK associated with no gateway; local network only"
+  exit 0
+fi
+
 log "probing external connectivity (1.1.1.1)"
 for i in $(seq 1 40); do
   if ping -I "$IFACE" -c 1 -W 1 1.1.1.1 >/dev/null 2>&1; then
@@ -378,11 +391,18 @@ for i in $(seq 1 40); do
   log "  probe $i/40 failed"
   sleep 1
 done
-log "ERR associated but external ping never replied"
+log "external ping never replied"
 log "final route table:"
 ip route 2>&1 | sed 's/^/  /'
 log "neighbours:"
 ip neigh show dev "$IFACE" 2>&1 | sed 's/^/  /'
+# Associated and addressed but no internet: still a usable local network
+# (offline mode). Only fail when there is no address at all.
+if ip -4 addr show "$IFACE" | grep -q "inet "; then
+  log "OK associated with an address but no internet; local network only"
+  exit 0
+fi
+log "ERR associated but no IPv4 address"
 exit 1
 SCRIPT
 chmod 755 /usr/local/bin/frc-wifi-connect
@@ -593,6 +613,8 @@ Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/${SERVICE_UID}
 Environment=PULSE_SERVER=unix:/run/user/${SERVICE_UID}/pulse/native
 ExecStartPre=/bin/bash ${INSTALL_DIR}/check-update.sh
+# check-update.sh may re-run the installer (apt, NetworkManager restart).
+TimeoutStartSec=900
 ExecStart=/usr/local/bin/bun run ${INSTALL_DIR}/src/daemon.ts
 Restart=on-failure
 RestartSec=5
@@ -637,7 +659,65 @@ HandleLidSwitchExternalPower=ignore
 HandleLidSwitchDocked=ignore
 EOF
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target 2>/dev/null || true
-systemctl restart systemd-logind 2>/dev/null || true
+# HUP reloads logind.conf without restarting logind under a live session
+# (this script also runs from check-update.sh on an installed box).
+pkill -HUP -x systemd-logind 2>/dev/null || true
+
+# ── Local control reachability ────────────────────────────────────────────────
+# With no internet the daemon serves its controller at http://<host>.local:3000
+# (offline mode). mDNS makes the name resolve on the local network.
+echo "[16] Enabling mDNS..."
+mkdir -p /etc/avahi/services
+cat > /etc/avahi/services/frc-display.service << 'EOF'
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">FRC Display %h</name>
+  <service><type>_http._tcp</type><port>3000</port><txt-record>path=/control</txt-record></service>
+</service-group>
+EOF
+systemctl enable --now avahi-daemon 2>/dev/null || true
+
+# A laptop on a direct cable has no DHCP server to share with the box. Keep a
+# fixed IPv4 link-local address (derived from the MAC) on every wired NIC, next
+# to whatever else it has, so the laptop's own 169.254.x address can reach it.
+echo "[17] Installing ethernet link-local keeper..."
+cat > /usr/local/bin/frc-eth-linklocal << 'SCRIPT'
+#!/bin/bash
+# frc-eth-linklocal: re-adds the address every 10s in case NetworkManager or
+# a cable replug removes it.
+while true; do
+  for d in /sys/class/net/*; do
+    i=$(basename "$d")
+    [ -e "$d/device" ] || continue
+    [ -d "$d/wireless" ] && continue
+    mac=$(cat "$d/address")
+    a=$(( 0x${mac:12:2} % 254 + 1 )); b=$(( 0x${mac:15:2} % 254 + 1 ))
+    ip -4 addr show dev "$i" | grep -q "inet 169.254.$a.$b/" \
+      || ip addr add "169.254.$a.$b/16" dev "$i" scope link 2>/dev/null
+  done
+  sleep 10
+done
+SCRIPT
+chmod 755 /usr/local/bin/frc-eth-linklocal
+cat > /etc/systemd/system/frc-eth-linklocal.service << 'EOF'
+[Unit]
+Description=FRC Display ethernet IPv4 link-local address
+After=network-pre.target
+
+[Service]
+ExecStart=/usr/local/bin/frc-eth-linklocal
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now frc-eth-linklocal.service 2>/dev/null || true
+
+mkdir -p /etc/frc-display
+echo "$INSTALL_REV" > /etc/frc-display/install-rev
+chmod 644 /etc/frc-display/install-rev
 
 echo ""
 echo "=== Install complete! ==="
