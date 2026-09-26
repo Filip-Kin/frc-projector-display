@@ -414,6 +414,12 @@ async function stayOfflineIfLinked(why: string): Promise<boolean> {
   if (!hasReplayedOnce || state.kiosksShowingConnecting) {
     hasReplayedOnce = true;
     state.kiosksShowingConnecting = false;
+    // The route monitor gets here within a second of startup, before the
+    // kiosk Chromium windows have mapped. An NDI player started then ends up
+    // underneath Chromium's window (blank page on screen). Give the kiosks
+    // time to come up first.
+    const wait = 10000 - process.uptime() * 1000;
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
     await restoreOutputs();
   }
   if (!audioPollStarted) { audioPollStarted = true; pollAudioSinks(); }
