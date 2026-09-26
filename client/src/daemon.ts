@@ -490,15 +490,16 @@ setInterval(async () => {
 await initOutputs();
 log('info', `[outputs] initialised ${state.outputs.length} output(s): ${state.outputs.map(o => o.id).join(', ')}`);
 
-localServer.listen(LOCAL_PORT, '0.0.0.0', () => {
+localServer.listen(LOCAL_PORT, '::', () => {
   log('info', `[daemon] local HTTP server on port ${LOCAL_PORT}`);
   setTimeout(() => {
-    if (!state.wsEverConnected) cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
+    // Skip when offline mode already replayed the outputs (route monitor at boot).
+    if (!state.wsEverConnected && !hasReplayedOnce) cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
   }, 3000);
 });
 
 if (httpsServer) {
-  httpsServer.listen(4443, '0.0.0.0', () => log('info', '[daemon] local HTTPS server on port 4443'));
+  httpsServer.listen(4443, '::', () => log('info', '[daemon] local HTTPS server on port 4443'));
   httpsServer.on('error', (err: Error) => log('error', `[daemon] HTTPS server: ${err.message}`));
 } else {
   log('warn', '[daemon] no TLS cert at /etc/frc-display/cert.pem — HTTPS probes will fail');

@@ -851,9 +851,9 @@ setInterval(refresh,1000);
 }
 
 async function buildLocalQrPage() {
-  const addrs = await getLocalAddresses().catch(() => []);
+  const addrs = await getLocalAddresses(true).catch(() => []);
   const host = `${osHostname()}.local`;
-  const primary = addrs[0]?.ip ?? host;
+  const primary = addrs.find(a => !a.ip.startsWith('169.254.'))?.ip ?? host;
   const controlUrl = `http://${primary}:${LOCAL_PORT}/control?pin=${PIN}`;
   const qr = await QRCode.toDataURL(controlUrl, { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
   const rows = [
