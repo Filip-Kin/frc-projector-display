@@ -558,6 +558,14 @@ for name, addr, port in avahi_browse('_omt._tcp'):
         seen.add(key)
         sources.append({'label': f'OMT: {name}', 'value': f'omt://{addr}:{port}'})
 
+# omtx: OMT with H.264/HEVC for Wi-Fi (Projects/omtx), its own service type
+for name, addr, port in avahi_browse('_omtx._tcp'):
+    if ':' in addr: continue
+    key = f'omtx {addr}:{port}'
+    if key not in seen:
+        seen.add(key)
+        sources.append({'label': f'omtx: {name}', 'value': f'omtx://{addr}:{port}'})
+
 print(json.dumps(sources))
 PYSCRIPT
 chmod +x /usr/local/bin/ndi-sources.py
@@ -596,6 +604,21 @@ else
   echo "  [OMT] Warning: could not download omt-play (OMT playback unavailable)"
 fi
 rm -rf "$TMP_OMT"
+
+# ── omtx (OMT with H.264 for Wi-Fi) ───────────────────────────────────────────
+# omtx-play: receives an omtx source and plays it in ffplay. Built by
+# Projects/omtx build/Dockerfile (NativeAOT, Debian 11 base); needs ffmpeg/ffplay.
+echo "  [omtx] Installing omtx-play..."
+OMTX_URL="https://storage.googleapis.com/frc-display-assets/omtx-play-linux-${NDI_TOOLS_ARCH}.tar.gz"
+TMP_OMTX=$(mktemp -d)
+if curl -fsSL --max-time 60 "$OMTX_URL" | tar -xz -C "$TMP_OMTX" 2>/dev/null; then
+  install -m 755 "$TMP_OMTX/omtx"               /usr/local/bin/omtx
+  install -m 755 "$TMP_OMTX/omtx-play-wrapper"  /usr/local/bin/omtx-play-wrapper
+  echo "  [omtx] omtx-play installed"
+else
+  echo "  [omtx] Warning: could not download omtx-play (omtx playback unavailable)"
+fi
+rm -rf "$TMP_OMTX"
 
 # ── Systemd service ────────────────────────────────────────────────────────────
 echo "[12] Installing systemd service..."

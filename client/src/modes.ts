@@ -13,9 +13,10 @@ const WS_URL     = SERVER_URL.replace(/^https?:\/\//, m => m === 'https://' ? 'w
 export let PIN = '';
 export function setPin(p: string) { PIN = p; }
 
-// omt:// sources play through omt-play, everything else through ndi-play.
-// Both players take the same arguments.
+// omt:// sources play through omt-play, omtx:// (OMT with H.264, Projects/omtx) through
+// omtx-play, everything else through ndi-play. All three players take the same arguments.
 function playerFor(source: string): string {
+  if (source.startsWith('omtx://')) return 'omtx-play-wrapper';
   return source.startsWith('omt://') ? 'omt-play-wrapper' : 'ndi-play-wrapper';
 }
 

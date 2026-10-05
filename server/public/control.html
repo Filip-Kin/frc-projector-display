@@ -811,13 +811,13 @@ function updateNdiSources(sources) {
   if (selectedMode === 'queuing' && queuingStream === 'ndi') populateQueuingNdi();
 }
 
-// NDI has full and proxy streams; OMT has three suggested qualities.
+// NDI has full and proxy streams; OMT and omtx have three suggested qualities.
 const NDI_QUALITY_OPTIONS = [['high', 'High quality (NDI full)'], ['low', 'Low bandwidth (NDI proxy)']];
 const OMT_QUALITY_OPTIONS = [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']];
 function updateQualityOptions() {
   const src = document.getElementById('ndi-source-select').value;
   const sel = document.getElementById('ndi-bandwidth');
-  const opts = src.startsWith('omt://') ? OMT_QUALITY_OPTIONS : NDI_QUALITY_OPTIONS;
+  const opts = /^omtx?:\/\//.test(src) ? OMT_QUALITY_OPTIONS : NDI_QUALITY_OPTIONS;
   const key = opts.map(o => o[0]).join(',');
   if (sel.dataset.options === key) return;
   sel.dataset.options = key;
