@@ -194,12 +194,8 @@ async function handleCommand(msg: any) {
         await setChromiumOnOutput(outputId, msg.url);
         recordOutputMode(outputId, { mode: 'chromium', url: msg.url });
       } else if (msg.mode === 'ndi' && msg.source) {
-        if ((msg.source as string).startsWith('omt://')) {
-          emit({ type: 'error', message: 'OMT playback is not yet supported on Linux. NDI from the same source works fine.' });
-        } else {
-          setNdiOnOutput(outputId, msg.source, msg.bandwidth ?? 'high');
-          recordOutputMode(outputId, { mode: 'ndi', source: msg.source, bandwidth: msg.bandwidth ?? 'high' });
-        }
+        setNdiOnOutput(outputId, msg.source, msg.bandwidth ?? 'high');
+        recordOutputMode(outputId, { mode: 'ndi', source: msg.source, bandwidth: msg.bandwidth ?? 'high' });
       } else if (msg.mode === 'queuing' && msg.eventKey) {
         const streamType = msg.streamType === 'ndi' ? 'ndi' : 'youtube';
         const streamSize = msg.streamSize === 60 ? 60 : 70;

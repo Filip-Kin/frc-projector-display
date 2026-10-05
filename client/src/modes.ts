@@ -13,6 +13,12 @@ const WS_URL     = SERVER_URL.replace(/^https?:\/\//, m => m === 'https://' ? 'w
 export let PIN = '';
 export function setPin(p: string) { PIN = p; }
 
+// omt:// sources play through omt-play, everything else through ndi-play.
+// Both players take the same arguments.
+function playerFor(source: string): string {
+  return source.startsWith('omt://') ? 'omt-play-wrapper' : 'ndi-play-wrapper';
+}
+
 export async function stopNdiOnOutput(o: OutputState) {
   if (o.ndiProcess) {
     const proc = o.ndiProcess;
@@ -70,7 +76,7 @@ export async function setQueuingOnOutput(
       DISPLAY: process.env.DISPLAY ?? ':0',
       SDL_VIDEO_FULLSCREEN_DISPLAY: String(o.displayIndex),
     };
-    const proc = spawn('ndi-play-wrapper', [streamSource, 'high', '--window', geom], { env, detached: false });
+    const proc = spawn(playerFor(streamSource), [streamSource, 'high', '--window', geom], { env, detached: false });
     proc.on('exit', code => {
       console.log(`[ndi:${o.id}] (queuing corner) exited (${code})`);
       if (o.ndiProcess === proc) o.ndiProcess = null;
@@ -85,11 +91,6 @@ export async function setQueuingOnOutput(
 export function setNdiOnOutput(outputId: string, source: string, bandwidth: 'high' | 'low' = 'high') {
   const o = getOutput(outputId); if (!o) return;
 
-  if (source.startsWith('omt://')) {
-    console.error(`[omt] playback not yet supported (libomt stub)`);
-    return;
-  }
-
   // Fire-and-forget stop of previous NDI on this output (source-switch path)
   stopNdiOnOutput(o);
   // Hide chromium underneath; ndi-play fullscreens over it
@@ -100,7 +101,7 @@ export function setNdiOnOutput(outputId: string, source: string, bandwidth: 'hig
     DISPLAY: process.env.DISPLAY ?? ':0',
     SDL_VIDEO_FULLSCREEN_DISPLAY: String(o.displayIndex),
   };
-  const proc = spawn('ndi-play-wrapper', [source, bandwidth], { env, detached: false });
+  const proc = spawn(playerFor(source), [source, bandwidth], { env, detached: false });
   proc.on('exit', code => {
     console.log(`[ndi:${o.id}] exited (${code})`);
     if (o.ndiProcess === proc) o.ndiProcess = null;

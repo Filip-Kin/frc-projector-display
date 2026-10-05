@@ -713,10 +713,6 @@ function applyMode() {
       const src = document.getElementById('ndi-source-select').value;
       if (!src) { toast('Select a video source'); return; }
       const bandwidth = document.getElementById('ndi-bandwidth').value;
-      if (src.startsWith('omt://')) {
-        toast('OMT playback not yet supported — use the NDI source from the same device');
-        return;
-      }
       msg = { type: 'set_mode', mode: 'ndi', source: src, bandwidth };
       break;
     }
@@ -780,7 +776,6 @@ function applyMode() {
       } else {
         streamSource = document.getElementById('queuing-ndi-select').value;
         if (!streamSource) { toast('Select an NDI source'); return; }
-        if (streamSource.startsWith('omt://')) { toast('OMT not supported yet'); return; }
       }
       const sidebar = document.getElementById('queuing-sidebar').value;
       const bottom  = document.getElementById('queuing-bottom').value;
@@ -800,11 +795,7 @@ function applyMode() {
 // ── NDI ───────────────────────────────────────────────────────────────────────
 
 function updateNdiSources(sources) {
-  // Filter out OMT sources — playback not yet supported on Linux
-  ndiSources = (sources || []).filter(s => {
-    const val = typeof s === 'object' ? s.value : s;
-    return !val.startsWith('omt://');
-  });
+  ndiSources = sources || [];
   const sel = document.getElementById('ndi-source-select');
   const prev = sel.value;
   sel.innerHTML = ndiSources.length

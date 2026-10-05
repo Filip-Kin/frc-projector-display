@@ -552,6 +552,7 @@ for name, _a, _p in avahi_browse('_ndi._tcp'):
         sources.append({'label': f'NDI: {name}', 'value': name})
 
 for name, addr, port in avahi_browse('_omt._tcp'):
+    if ':' in addr: continue  # IPv6: omt://fe80::...:port does not parse; the IPv4 record is used
     key = f'{addr}:{port}'
     if key not in seen:
         seen.add(key)
@@ -576,20 +577,23 @@ fi
 rm -rf "$TMP_NDI"
 
 # ── OMT tools ─────────────────────────────────────────────────────────────────
-echo "  [OMT] Installing OMT tools..."
+# omt-play: SDL2 OMT receiver built from upstream libomt/libvmx (ndi-build repo,
+# omt.Dockerfile). Replaces the ffplay-omt build, which never connected.
+echo "  [OMT] Installing omt-play..."
 NDI_TOOLS_ARCH="x86_64"
 case "$(uname -m)" in aarch64|arm64) NDI_TOOLS_ARCH="aarch64" ;; armv7*|armhf) NDI_TOOLS_ARCH="armhf" ;; esac
-OMT_TOOLS_URL="https://storage.googleapis.com/frc-display-assets/omt-tools-linux-${NDI_TOOLS_ARCH}.tar.gz"
+OMT_TOOLS_URL="https://storage.googleapis.com/frc-display-assets/omt-play-linux-${NDI_TOOLS_ARCH}.tar.gz"
 TMP_OMT=$(mktemp -d)
 if curl -fsSL --max-time 60 "$OMT_TOOLS_URL" | tar -xz -C "$TMP_OMT" 2>/dev/null; then
-  install -m 755 "$TMP_OMT/ffplay-omt"        /usr/local/bin/ffplay-omt
+  install -m 755 "$TMP_OMT/omt-play"          /usr/local/bin/omt-play
   install -m 755 "$TMP_OMT/omt-play-wrapper"  /usr/local/bin/omt-play-wrapper
   install -m 644 "$TMP_OMT/libomt.so"         /usr/local/lib/libomt.so
   install -m 644 "$TMP_OMT/libvmx.so"         /usr/local/lib/libvmx.so
+  rm -f /usr/local/bin/ffplay-omt
   ldconfig
-  echo "  [OMT] installed"
+  echo "  [OMT] omt-play installed"
 else
-  echo "  [OMT] Warning: could not download OMT tools (OMT playback unavailable)"
+  echo "  [OMT] Warning: could not download omt-play (OMT playback unavailable)"
 fi
 rm -rf "$TMP_OMT"
 
