@@ -88,7 +88,7 @@ export async function setQueuingOnOutput(
   }
 }
 
-export function setNdiOnOutput(outputId: string, source: string, bandwidth: 'high' | 'low' = 'high') {
+export function setNdiOnOutput(outputId: string, source: string, bandwidth: 'high' | 'medium' | 'low' = 'high') {
   const o = getOutput(outputId); if (!o) return;
 
   // Fire-and-forget stop of previous NDI on this output (source-switch path)

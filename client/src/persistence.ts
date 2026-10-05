@@ -14,7 +14,7 @@ export interface OutputModeRecord {
   mode: 'home' | 'chromium' | 'ndi' | 'queuing';
   url?: string;
   source?: string;
-  bandwidth?: 'high' | 'low';
+  bandwidth?: 'high' | 'medium' | 'low';
   eventKey?: string;
   streamType?: 'youtube' | 'ndi';
   streamSource?: string;

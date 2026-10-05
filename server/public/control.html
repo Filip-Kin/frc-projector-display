@@ -340,7 +340,7 @@
   <div class="mode-config" id="config-ndi">
     <label>Video Source</label>
     <div style="display:flex;gap:8px">
-      <select id="ndi-source-select" style="flex:1">
+      <select id="ndi-source-select" style="flex:1" onchange="updateQualityOptions()">
         <option value="">-- refreshing sources… --</option>
       </select>
     </div>
@@ -807,7 +807,22 @@ function updateNdiSources(sources) {
     : '<option value="">-- no sources found --</option>';
   const prevValid = ndiSources.some(s => (typeof s === 'object' ? s.value : s) === prev);
   if (prev && prevValid) sel.value = prev;
+  updateQualityOptions();
   if (selectedMode === 'queuing' && queuingStream === 'ndi') populateQueuingNdi();
+}
+
+// NDI has full and proxy streams; OMT has three suggested qualities.
+const NDI_QUALITY_OPTIONS = [['high', 'High quality (NDI full)'], ['low', 'Low bandwidth (NDI proxy)']];
+const OMT_QUALITY_OPTIONS = [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']];
+function updateQualityOptions() {
+  const src = document.getElementById('ndi-source-select').value;
+  const sel = document.getElementById('ndi-bandwidth');
+  const opts = src.startsWith('omt://') ? OMT_QUALITY_OPTIONS : NDI_QUALITY_OPTIONS;
+  const key = opts.map(o => o[0]).join(',');
+  if (sel.dataset.options === key) return;
+  sel.dataset.options = key;
+  sel.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+  sel.value = 'high';
 }
 
 // ── YouTube ───────────────────────────────────────────────────────────────────
