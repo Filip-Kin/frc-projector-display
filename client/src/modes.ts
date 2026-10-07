@@ -13,11 +13,13 @@ const WS_URL     = SERVER_URL.replace(/^https?:\/\//, m => m === 'https://' ? 'w
 export let PIN = '';
 export function setPin(p: string) { PIN = p; }
 
-// omt:// sources play through omt-play, omtx:// (OMT with H.264, Projects/omtx) through
-// omtx-play, everything else through ndi-play. All three players take the same arguments.
+// omt:// and omtx:// (OMT with H.264, github.com/Filip-Kin/omtx) play through omtx play, which
+// ships inside the client bundle (see Dockerfile); everything else through ndi-play. Both take
+// the same arguments: <source> <high|medium|low> [--window WxH+X+Y].
+const INSTALL_DIR = process.env.INSTALL_DIR ?? '/opt/frc-projector-display/client';
+const OMTX_PLAYER = `${INSTALL_DIR}/players/omtx/omtx-play-wrapper`;
 function playerFor(source: string): string {
-  if (source.startsWith('omtx://')) return 'omtx-play-wrapper';
-  return source.startsWith('omt://') ? 'omt-play-wrapper' : 'ndi-play-wrapper';
+  return /^omtx?:\/\//.test(source) ? OMTX_PLAYER : 'ndi-play-wrapper';
 }
 
 export async function stopNdiOnOutput(o: OutputState) {

@@ -504,13 +504,6 @@ chmod 440 /etc/sudoers.d/frc-display
 # ── NDI source discovery ───────────────────────────────────────────────────────
 echo "[11] Installing NDI tools..."
 
-# ndi-list-sources: uses avahi mDNS (no SDK needed) + falls back to NDI SDK tools
-cat > /usr/local/bin/ndi-list-sources << 'NDISCRIPT'
-#!/bin/bash
-python3 /usr/local/bin/ndi-sources.py
-NDISCRIPT
-chmod +x /usr/local/bin/ndi-list-sources
-
 # Install ndi-play binary + libndi.so from GCS (no account needed, fully automated)
 NDI_TOOLS_ARCH="x86_64"
 case "$(uname -m)" in
@@ -519,56 +512,7 @@ case "$(uname -m)" in
 esac
 NDI_TOOLS_URL="https://storage.googleapis.com/frc-display-assets/ndi-tools-linux-${NDI_TOOLS_ARCH}.tar.gz"
 
-# Write ndi-sources.py (avahi discovery, human-readable output parser)
-cat > /usr/local/bin/ndi-sources.py << 'PYSCRIPT'
-#!/usr/bin/env python3
-import json, re, subprocess
-
-def avahi_browse(svc):
-    try:
-        r = subprocess.run(['avahi-browse', '-t', '-r', svc],
-                           capture_output=True, text=True, timeout=5)
-    except Exception:
-        return []
-    results = []
-    current_name = None; addr = None
-    for line in r.stdout.split('\n'):
-        m = re.match(r'^=\s+\S+\s+\S+\s+(.+?)\s{2,}' + re.escape(svc), line)
-        if m:
-            current_name = m.group(1).strip(); addr = None; continue
-        if current_name:
-            am = re.match(r'\s+address\s*=\s*\[(.+?)\]', line)
-            pm = re.match(r'\s+port\s*=\s*\[(\d+)\]', line)
-            if am: addr = am.group(1)
-            if pm and addr: results.append((current_name, addr, pm.group(1))); current_name = None
-    return results
-
-sources = []
-seen = set()
-
-for name, _a, _p in avahi_browse('_ndi._tcp'):
-    if name not in seen:
-        seen.add(name)
-        sources.append({'label': f'NDI: {name}', 'value': name})
-
-for name, addr, port in avahi_browse('_omt._tcp'):
-    if ':' in addr: continue  # IPv6: omt://fe80::...:port does not parse; the IPv4 record is used
-    key = f'{addr}:{port}'
-    if key not in seen:
-        seen.add(key)
-        sources.append({'label': f'OMT: {name}', 'value': f'omt://{addr}:{port}'})
-
-# omtx: OMT with H.264/HEVC for Wi-Fi (Projects/omtx), its own service type
-for name, addr, port in avahi_browse('_omtx._tcp'):
-    if ':' in addr: continue
-    key = f'omtx {addr}:{port}'
-    if key not in seen:
-        seen.add(key)
-        sources.append({'label': f'omtx: {name}', 'value': f'omtx://{addr}:{port}'})
-
-print(json.dumps(sources))
-PYSCRIPT
-chmod +x /usr/local/bin/ndi-sources.py
+# Source listing (NDI, OMT, omtx) is client/sources.py, shipped in the client bundle.
 
 echo "  [NDI] Installing ndi-play from ${NDI_TOOLS_URL}..."
 TMP_NDI=$(mktemp -d)
@@ -584,41 +528,8 @@ else
 fi
 rm -rf "$TMP_NDI"
 
-# ── OMT tools ─────────────────────────────────────────────────────────────────
-# omt-play: SDL2 OMT receiver built from upstream libomt/libvmx (ndi-build repo,
-# omt.Dockerfile). Replaces the ffplay-omt build, which never connected.
-echo "  [OMT] Installing omt-play..."
-NDI_TOOLS_ARCH="x86_64"
-case "$(uname -m)" in aarch64|arm64) NDI_TOOLS_ARCH="aarch64" ;; armv7*|armhf) NDI_TOOLS_ARCH="armhf" ;; esac
-OMT_TOOLS_URL="https://storage.googleapis.com/frc-display-assets/omt-play-linux-${NDI_TOOLS_ARCH}.tar.gz"
-TMP_OMT=$(mktemp -d)
-if curl -fsSL --max-time 60 "$OMT_TOOLS_URL" | tar -xz -C "$TMP_OMT" 2>/dev/null; then
-  install -m 755 "$TMP_OMT/omt-play"          /usr/local/bin/omt-play
-  install -m 755 "$TMP_OMT/omt-play-wrapper"  /usr/local/bin/omt-play-wrapper
-  install -m 644 "$TMP_OMT/libomt.so"         /usr/local/lib/libomt.so
-  install -m 644 "$TMP_OMT/libvmx.so"         /usr/local/lib/libvmx.so
-  rm -f /usr/local/bin/ffplay-omt
-  ldconfig
-  echo "  [OMT] omt-play installed"
-else
-  echo "  [OMT] Warning: could not download omt-play (OMT playback unavailable)"
-fi
-rm -rf "$TMP_OMT"
-
-# ── omtx (OMT with H.264 for Wi-Fi) ───────────────────────────────────────────
-# omtx-play: receives an omtx source and plays it in ffplay. Built by
-# Projects/omtx build/Dockerfile (NativeAOT, Debian 11 base); needs ffmpeg/ffplay.
-echo "  [omtx] Installing omtx-play..."
-OMTX_URL="https://storage.googleapis.com/frc-display-assets/omtx-play-linux-${NDI_TOOLS_ARCH}.tar.gz"
-TMP_OMTX=$(mktemp -d)
-if curl -fsSL --max-time 60 "$OMTX_URL" | tar -xz -C "$TMP_OMTX" 2>/dev/null; then
-  install -m 755 "$TMP_OMTX/omtx"               /usr/local/bin/omtx
-  install -m 755 "$TMP_OMTX/omtx-play-wrapper"  /usr/local/bin/omtx-play-wrapper
-  echo "  [omtx] omtx-play installed"
-else
-  echo "  [omtx] Warning: could not download omtx-play (omtx playback unavailable)"
-fi
-rm -rf "$TMP_OMTX"
+# OMT and omtx playback: the omtx player ships in the client bundle (players/omtx).
+rm -f /usr/local/bin/ffplay-omt /usr/local/bin/omt-play-wrapper
 
 # ── Systemd service ────────────────────────────────────────────────────────────
 echo "[12] Installing systemd service..."

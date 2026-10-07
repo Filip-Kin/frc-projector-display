@@ -7,6 +7,11 @@ RUN bun install --production
 
 # ── Client source (bundled for self-hosted distribution) ─────────────────────
 COPY client/ ./client-dist/
+# omtx player (stock OMT and omtx), shipped in the client bundle so boxes get it with a normal
+# client update. Debian's ffmpeg package on the box provides libavcodec and SDL2.
+ARG OMTX_VERSION=v0.2.1
+ADD https://github.com/Filip-Kin/omtx/releases/download/${OMTX_VERSION}/omtx-play-linux-x86_64.tar.gz /tmp/omtx-play.tar.gz
+RUN mkdir -p ./client-dist/players/omtx && tar -xzf /tmp/omtx-play.tar.gz -C ./client-dist/players/omtx && rm /tmp/omtx-play.tar.gz
 # Bundle the controller page so the daemon can serve it offline
 COPY server/public/control.html ./client-dist/public/control.html
 
