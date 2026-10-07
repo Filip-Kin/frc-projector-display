@@ -13,7 +13,7 @@ set -e
 # compares it with /etc/frc-display/install-rev at boot and re-runs the
 # installer (frc-install) when it is newer, so helper-script and system fixes
 # reach boxes already in the field, not just new installs.
-INSTALL_REV=2
+INSTALL_REV=3
 
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
@@ -73,6 +73,11 @@ pcm.default pulse
 ctl.default pulse
 ASOUNDEOF
     apt-get install -y openssl >/dev/null
+    # GPU video decode (VA-API) for the omtx player and Chromium: i965 for older Intel (the
+    # Bay Trail boxes: halves the CPU time per 1080p frame), intel-media for newer Intel, mesa
+    # for AMD. Separate line: a package missing on some release must not stop the install.
+    apt-get install -y i965-va-driver intel-media-va-driver mesa-va-drivers >/dev/null 2>&1 \
+      || echo "  [VA-API] Warning: some video decode drivers did not install"
     ;;
   dnf)
     dnf install -y \
