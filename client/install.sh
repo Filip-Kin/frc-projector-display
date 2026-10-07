@@ -13,7 +13,7 @@ set -e
 # compares it with /etc/frc-display/install-rev at boot and re-runs the
 # installer (frc-install) when it is newer, so helper-script and system fixes
 # reach boxes already in the field, not just new installs.
-INSTALL_REV=1
+INSTALL_REV=2
 
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
@@ -411,7 +411,12 @@ cat > /usr/local/bin/frc-install << SCRIPT
 #!/bin/bash
 # frc-install — re-apply install.sh after an update
 SERVER_URL="\${SERVER_URL:-${SERVER_URL}}"
-curl -fsSL "\${SERVER_URL}/install.sh" | SERVICE_USER="${SERVICE_USER}" INSTALL_DIR="${INSTALL_DIR}" bash
+# Whole script first, then run it: piped into bash, a link drop mid-download (the installer
+# restarts NetworkManager) would run a truncated script.
+T=\$(mktemp)
+curl -fsSL "\${SERVER_URL}/install.sh" -o "\$T" || { rm -f "\$T"; exit 1; }
+SERVICE_USER="${SERVICE_USER}" INSTALL_DIR="${INSTALL_DIR}" bash "\$T"; RC=\$?
+rm -f "\$T"; exit \$RC
 SCRIPT
 chmod 755 /usr/local/bin/frc-install
 
@@ -652,6 +657,47 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now frc-eth-linklocal.service 2>/dev/null || true
+
+# ── Clock ─────────────────────────────────────────────────────────────────────
+# These boxes have dead CMOS batteries: they boot with the clock where it was last saved
+# (months behind), and every HTTPS request to the server fails until it is right. NTP fixes it
+# when UDP 123 gets out, and venue networks often block that. frc-clock sets the clock from the
+# Date header of a plain HTTP response (no TLS involved) whenever NTP has not synced.
+cat > /usr/local/bin/frc-clock << 'SCRIPT'
+#!/bin/bash
+URLS="http://display.filipkin.com/version.json http://connectivitycheck.gstatic.com/generate_204 http://www.msftconnecttest.com/connecttest.txt"
+sleep 15   # give NTP its chance first
+while true; do
+  if [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; then sleep 300; continue; fi
+  for u in $URLS; do
+    d=$(curl -sI --max-time 5 "$u" 2>/dev/null | tr -d '\r' | sed -n 's/^[Dd]ate: //p' | head -1)
+    [ -n "$d" ] || continue
+    t=$(date -d "$d" +%s 2>/dev/null) || continue
+    now=$(date +%s)
+    off=$(( t > now ? t - now : now - t ))
+    if [ "$off" -gt 30 ]; then
+      date -s "@$t" >/dev/null && echo "frc-clock: clock was ${off}s off; set from $u"
+    fi
+    break
+  done
+  sleep 20
+done
+SCRIPT
+chmod 755 /usr/local/bin/frc-clock
+cat > /etc/systemd/system/frc-clock.service << 'EOF'
+[Unit]
+Description=FRC Display clock from HTTP when NTP is not synced
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/frc-clock
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now frc-clock.service 2>/dev/null || true
 
 mkdir -p /etc/frc-display
 echo "$INSTALL_REV" > /etc/frc-display/install-rev

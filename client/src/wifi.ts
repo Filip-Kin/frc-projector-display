@@ -15,7 +15,16 @@ export function getWifiInterface(): Promise<string | null> {
 // silently give up after a few failures and won't retry until something
 // resets the device, leaving the box with no wifi fallback if ethernet
 // drops. We poke it explicitly on daemon startup and as a recovery step.
+// Startup and the route monitor both call this at boot. One call at a time, and leave a profile
+// NetworkManager is already activating alone: re-activating it cancels the activation in progress
+// (seen on filip-display-2: lease at 13.6 s, killed by a second activation at 13.7 s).
+let ensuring: Promise<void> | null = null;
 export function ensureSavedWifiConnected(): Promise<void> {
+  ensuring ??= ensureSavedWifiOnce().finally(() => { ensuring = null; });
+  return ensuring;
+}
+
+function ensureSavedWifiOnce(): Promise<void> {
   return new Promise((resolve) => {
     exec("nmcli -t -f NAME,TYPE,STATE con show", (err, stdout) => {
       if (err) { resolve(); return; }
@@ -26,7 +35,7 @@ export function ensureSavedWifiConnected(): Promise<void> {
         const [name, type, state] = line.split(':');
         if (type !== '802-11-wireless') continue;
         if (name === 'frc-provision') continue;
-        if (state === 'activated') { alreadyActive = true; break; }
+        if (state === 'activated' || state === 'activating') { alreadyActive = true; break; }
         if (!target) target = name;
       }
       if (alreadyActive || !target) { resolve(); return; }

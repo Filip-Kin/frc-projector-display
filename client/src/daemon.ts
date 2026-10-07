@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
-import { execFile, execSync } from 'child_process';
-import { hostname as osHostname } from 'os';
+import { exec, execFile, execSync } from 'child_process';
+import { hostname as osHostname, uptime as osUptime } from 'os';
 
 // Singleton enforcement: a stale daemon left running from a previous
 // lifecycle (e.g. AP-mode handoff that didn't reach a clean systemctl
@@ -44,7 +44,9 @@ const SERVER_BASE  = process.env.SERVER_URL ?? 'https://display.filipkin.com';
 const SERVER_URL   = SERVER_BASE.replace(/^https?:\/\//, m => m === 'https://' ? 'wss://' : 'ws://');
 const INSTALL_DIR  = process.env.INSTALL_DIR ?? '/opt/frc-projector-display/client';
 const HOSTNAME     = osHostname();
-const BOOT_TIME_MS = Date.now() - Math.floor(process.uptime() * 1000);
+// Boot time from the clock as it is now: at startup the clock can still be months off (wrong
+// hardware clock, NTP not synced yet).
+const bootTimeMs = () => Date.now() - Math.floor(osUptime() * 1000);
 
 const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function generatePin() {
@@ -260,6 +262,7 @@ function connectToServer() {
   state.serverWs.on('pong', () => { pongReceived = true; });
 
   state.serverWs.on('open', async () => {
+    const firstConnect = !state.wsEverConnected;
     state.wsEverConnected = true;
     if (apCheckTimer) { clearTimeout(apCheckTimer); apCheckTimer = null; }
     if (connectingNavTimer) { clearTimeout(connectingNavTimer); connectingNavTimer = null; }
@@ -294,10 +297,11 @@ function connectToServer() {
       type: 'register', pin: PIN,
       outputs: outputsForRegister(),
       hostname: HOSTNAME,
-      bootTimeMs: BOOT_TIME_MS,
+      bootTimeMs: bootTimeMs(),
       version: VERSION,
       outputModes: currentOutputModes(),
     }));
+    if (firstConnect) updateIfBehind();
 
     let pingTick = 0;
     let consecutiveMisses = 0;
@@ -323,7 +327,7 @@ function connectToServer() {
         type: 'heartbeat',
         version: VERSION,
         hostname: HOSTNAME,
-        bootTimeMs: BOOT_TIME_MS,
+        bootTimeMs: bootTimeMs(),
         // We're sending over the WS — by definition the server is reachable.
         hasInternet: true,
         outputModes: currentOutputModes(),
@@ -422,6 +426,29 @@ async function stayOfflineIfLinked(why: string): Promise<boolean> {
   return true;
 }
 
+// check-update.sh runs once at boot, before the daemon. On a box that reaches the server over
+// Wi-Fi the network is not up yet at that point, so it never updated (filip-display-2 sat on
+// 1.5.13). Check again on the first server connection of each daemon run: update, then restart
+// the daemon on the new code. The installer part waits for the next boot, as after provisioning.
+async function updateIfBehind() {
+  try {
+    const res = await fetch(`${SERVER_BASE}/version.json`, { signal: AbortSignal.timeout(10000) });
+    const remote = (await res.json())?.version;
+    if (!remote || remote === VERSION) return;
+    log('info', `[update] server has v${remote}, running v${VERSION}; updating`);
+    const out: string = await new Promise(resolve =>
+      exec(`/bin/bash "${INSTALL_DIR}/check-update.sh"`, { timeout: 180000, env: { ...process.env, FRC_SKIP_INSTALLER: '1' } },
+        (_e, stdout) => resolve(stdout ?? '')));
+    log('info', out.trim());
+    if (out.includes('[update] done')) {
+      log('info', '[update] restarting the daemon on the new client');
+      exec('nohup sh -c "sleep 1 && sudo systemctl restart display-daemon" >/dev/null 2>&1 &');
+    }
+  } catch (e: any) {
+    log('warn', `[update] check failed: ${e.message}`);
+  }
+}
+
 async function runNetworkStartup() {
   await new Promise(r => setTimeout(r, 15000));
   if (state.wsEverConnected) return;
@@ -451,9 +478,11 @@ async function runNetworkStartup() {
     await stayOfflineIfLinked('server not reached 15s after boot');
   }
 
-  const STARTUP_DEADLINE = Date.now() + 30000;
+  // performance.now(), not Date.now(): NTP can step the clock months forward during this loop
+  // (wrong hardware clock), which ended a Date.now() deadline at once and sent the box into AP mode.
+  const STARTUP_DEADLINE = performance.now() + 30000;
   let internetSeenOnline = false;
-  while (Date.now() < STARTUP_DEADLINE) {
+  while (performance.now() < STARTUP_DEADLINE) {
     if (state.wsEverConnected || state.serverWs?.readyState === WebSocket.OPEN) return;
     const r = await checkInternet();
     if (r.online) internetSeenOnline = true;
