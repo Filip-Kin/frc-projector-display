@@ -13,7 +13,7 @@ set -e
 # compares it with /etc/frc-display/install-rev at boot and re-runs the
 # installer (frc-install) when it is newer, so helper-script and system fixes
 # reach boxes already in the field, not just new installs.
-INSTALL_REV=4
+INSTALL_REV=5
 
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
@@ -58,6 +58,9 @@ fi
 echo "[3] Installing system packages..."
 case $PKG_MGR in
   apt)
+    # Fresh package lists first: on a re-run months after the last one, the versions apt asks
+    # for are gone from the mirror and the install 404s (filip-display-1, mesa-va-drivers).
+    apt-get update >/dev/null 2>&1 || echo "  [apt] Warning: apt-get update failed"
     apt-get install -y \
       xorg openbox lightdm lightdm-gtk-greeter \
       chromium x11vnc unclutter \
@@ -76,8 +79,9 @@ ASOUNDEOF
     # GPU video decode (VA-API) for the omtx player and Chromium: i965 for older Intel (the
     # Bay Trail boxes: halves the CPU time per 1080p frame), intel-media for newer Intel, mesa
     # for AMD. Separate line: a package missing on some release must not stop the install.
-    apt-get install -y i965-va-driver intel-media-va-driver mesa-va-drivers >/dev/null 2>&1 \
-      || echo "  [VA-API] Warning: some video decode drivers did not install"
+    for pkg in i965-va-driver intel-media-va-driver mesa-va-drivers; do
+      apt-get install -y "$pkg" >/dev/null 2>&1 || echo "  [VA-API] Warning: $pkg did not install"
+    done
     ;;
   dnf)
     dnf install -y \
