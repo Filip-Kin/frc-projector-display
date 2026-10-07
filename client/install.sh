@@ -13,7 +13,7 @@ set -e
 # compares it with /etc/frc-display/install-rev at boot and re-runs the
 # installer (frc-install) when it is newer, so helper-script and system fixes
 # reach boxes already in the field, not just new installs.
-INSTALL_REV=3
+INSTALL_REV=4
 
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
@@ -662,6 +662,32 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable --now frc-eth-linklocal.service 2>/dev/null || true
+
+# ── Ethernet: DHCP, else the field AV address ─────────────────────────────────
+# The FiM AV network (192.168.25.0/24) has no DHCP server. On these boxes the wired port is
+# run by ifupdown + dhcpcd, which NetworkManager does not manage, so the daemon's nmcli
+# field-static never applied; boxes got a hand-written static stanza that then broke DHCP
+# everywhere else (filip-display-1 sat "offline" on a home LAN). dhcpcd does it itself: DHCP
+# first, and with no answer a fixed address from the MAC (stable per box, distinct between
+# boxes), no gateway, so a Wi-Fi uplink keeps the default route.
+if [ -f /etc/dhcpcd.conf ]; then
+  sed -i '/^# frc-display field fallback begin/,/^# frc-display field fallback end/d' /etc/dhcpcd.conf
+  {
+    echo "# frc-display field fallback begin (written by install.sh)"
+    for d in /sys/class/net/*; do
+      i=$(basename "$d")
+      [ -e "$d/device" ] || continue
+      [ -d "$d/wireless" ] && continue
+      mac=$(cat "$d/address")
+      octet=$(( 150 + 0x${mac:15:2} % 100 ))
+      echo "profile frc_field_$i"
+      echo "static ip_address=192.168.25.${octet}/24"
+      echo "interface $i"
+      echo "fallback frc_field_$i"
+    done
+    echo "# frc-display field fallback end"
+  } >> /etc/dhcpcd.conf
+fi
 
 # ── Clock ─────────────────────────────────────────────────────────────────────
 # These boxes have dead CMOS batteries: they boot with the clock where it was last saved
