@@ -13,16 +13,21 @@ const WS_URL     = SERVER_URL.replace(/^https?:\/\//, m => m === 'https://' ? 'w
 export let PIN = '';
 export function setPin(p: string) { PIN = p; }
 
-// omt:// and omtx:// (OMT with H.264, github.com/Filip-Kin/omtx) play through omtx play, which
-// ships inside the client bundle (see Dockerfile); everything else through ndi-play. Both take
-// the same arguments: <source> <high|medium|low> [--window WxH+X+Y].
+// omt:// and omtx:// (OMT with H.264, github.com/Filip-Kin/omtx) play through omt-play
+// (players/omt-play, ndi-play for OMT), which ships inside the client bundle (see Dockerfile);
+// everything else through ndi-play. Both take <source> <quality> [--window WxH+X+Y].
 const INSTALL_DIR = process.env.INSTALL_DIR ?? '/opt/frc-projector-display/client';
-const OMTX_PLAYER = `${INSTALL_DIR}/players/omtx/omtx-play-wrapper`;
+const OMT_PLAYER = `${INSTALL_DIR}/players/omt/omt-play-wrapper`;
 function playerFor(source: string): string {
-  return /^omtx?:\/\//.test(source) ? OMTX_PLAYER : 'ndi-play-wrapper';
+  return /^omtx?:\/\//.test(source) ? OMT_PLAYER : 'ndi-play-wrapper';
 }
 
+// Bumped by every stop, so a player start still waiting for Chromium (setNdiOnOutput) knows a
+// newer command (another source, a web page, home) came in meanwhile and does not start.
+const playerGen = new WeakMap<OutputState, number>();
+
 export async function stopNdiOnOutput(o: OutputState) {
+  playerGen.set(o, (playerGen.get(o) ?? 0) + 1);
   if (o.ndiProcess) {
     const proc = o.ndiProcess;
     o.ndiProcess = null;
@@ -91,13 +96,17 @@ export async function setQueuingOnOutput(
   }
 }
 
-export function setNdiOnOutput(outputId: string, source: string, bandwidth: 'high' | 'medium' | 'low' = 'high') {
+export async function setNdiOnOutput(outputId: string, source: string, bandwidth: 'high' | 'medium' | 'low' = 'high') {
   const o = getOutput(outputId); if (!o) return;
 
   // Fire-and-forget stop of previous NDI on this output (source-switch path)
   stopNdiOnOutput(o);
-  // Hide chromium underneath; ndi-play fullscreens over it
-  cdpNavigate('about:blank', o.cdpPort);
+  const gen = playerGen.get(o);
+  // Hide chromium underneath; the player fullscreens over it. Wait for it (up to 10 s): right
+  // after a daemon restart Chromium comes up after the player otherwise, and its window lands on
+  // top of the video (white screen on filip-display-1).
+  await Promise.race([cdpNavigate('about:blank', o.cdpPort), new Promise(r => setTimeout(r, 10000))]);
+  if (getOutput(outputId) !== o || playerGen.get(o) !== gen) return;
 
   const env = {
     ...process.env,
