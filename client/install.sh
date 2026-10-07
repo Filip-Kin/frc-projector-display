@@ -13,7 +13,7 @@ set -e
 # compares it with /etc/frc-display/install-rev at boot and re-runs the
 # installer (frc-install) when it is newer, so helper-script and system fixes
 # reach boxes already in the field, not just new installs.
-INSTALL_REV=5
+INSTALL_REV=6
 
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
@@ -673,7 +673,10 @@ systemctl enable --now frc-eth-linklocal.service 2>/dev/null || true
 # field-static never applied; boxes got a hand-written static stanza that then broke DHCP
 # everywhere else (filip-display-1 sat "offline" on a home LAN). dhcpcd does it itself: DHCP
 # first, and with no answer a fixed address from the MAC (stable per box, distinct between
-# boxes), no gateway, so a Wi-Fi uplink keeps the default route.
+# boxes), no gateway, so a Wi-Fi uplink keeps the default route. Metric 100 puts the cable
+# ahead of Wi-Fi (NetworkManager, 600) when both reach the same network: dhcpcd's default of
+# 1002+ sent every stream over the boxes' 2.4 GHz Wi-Fi even with a cable plugged in
+# (filip-display-6: omtx at ~5 fps with drops over Wi-Fi, a steady 30 over the cable).
 if [ -f /etc/dhcpcd.conf ]; then
   sed -i '/^# frc-display field fallback begin/,/^# frc-display field fallback end/d' /etc/dhcpcd.conf
   {
@@ -687,6 +690,7 @@ if [ -f /etc/dhcpcd.conf ]; then
       echo "profile frc_field_$i"
       echo "static ip_address=192.168.25.${octet}/24"
       echo "interface $i"
+      echo "metric 100"
       echo "fallback frc_field_$i"
     done
     echo "# frc-display field fallback end"
