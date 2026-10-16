@@ -89,6 +89,12 @@ export function handleDevice(ws: WebSocket) {
         if (ctrl) send(ctrl, { type: 'metrics', metrics: msg.metrics });
       }
 
+    } else if (msg.type === 'network' || msg.type === 'wifi_networks' || msg.type === 'wifi_join') {
+      // Network panel replies: nothing to keep, straight to the controller.
+      if (!pin) return;
+      const ctrl = controllers.get(pin);
+      if (ctrl) send(ctrl, msg);
+
     } else if (msg.type === 'log') {
       if (pin && msg.level && msg.msg) {
         insertLog(pin, msg.level, msg.msg);

@@ -1,6 +1,7 @@
 import { exec, execFile } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { state } from './state.js';
+import { checkInternet } from './wifi.js';
 
 export interface EthernetStatus {
   iface: string;
@@ -116,4 +117,31 @@ export function getLocalAddresses(includeLinkLocal = false): Promise<{ iface: st
 
 export async function hasLocalLink(): Promise<boolean> {
   return (await getLocalAddresses()).length > 0;
+}
+
+// What the controller's Network panel shows: each physical NIC with carrier
+// and its address (Wi-Fi with its SSID), which one holds the default route,
+// and whether the server answers.
+export interface NetworkSnapshot {
+  interfaces: { iface: string; kind: 'wired' | 'wifi'; ip: string; ssid: string | null }[];
+  defaultIface: string | null;
+  internet: boolean;
+}
+export async function getNetworkSnapshot(): Promise<NetworkSnapshot> {
+  const sh = (cmd: string) => new Promise<string>(r => exec(cmd, (_e, out) => r(out || '')));
+  const [addrs, ssidOut, routeOut, net] = await Promise.all([
+    getLocalAddresses(true),
+    sh("nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | grep '^yes:' | head -1"),
+    sh('ip route show default 2>/dev/null'),
+    checkInternet(),
+  ]);
+  const ssid = ssidOut.trim().replace(/^yes:/, '').replace(/\\:/g, ':') || null;
+  return {
+    interfaces: addrs.map(a => {
+      const wifi = existsSync(`/sys/class/net/${a.iface}/wireless`);
+      return { iface: a.iface, kind: wifi ? 'wifi' : 'wired', ip: a.ip, ssid: wifi ? ssid : null };
+    }),
+    defaultIface: routeOut.match(/\bdev (\S+)/)?.[1] ?? null,
+    internet: net.online,
+  };
 }

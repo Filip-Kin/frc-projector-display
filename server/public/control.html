@@ -58,6 +58,7 @@
     white-space: nowrap;
   }
   button:active { opacity: 0.8; }
+  button:disabled { opacity: 0.5; cursor: default; }
   button.secondary {
     background: #333;
     color: #f0f0f0;
@@ -283,6 +284,44 @@
     min-width: 88px;
     text-align: right;
   }
+  #network-section {
+    background: #1c1c1c;
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 16px;
+  }
+  #network-section label {
+    display: block;
+    font-size: 0.8rem;
+    color: #888;
+    margin: 14px 0 6px;
+  }
+  .net-row { display: flex; gap: 10px; font-size: 0.85rem; padding: 3px 0; }
+  .net-row .k { flex: 0 0 64px; color: #888; }
+  .net-row .v { flex: 1; color: #ddd; overflow-wrap: anywhere; }
+  .net-row .v.yes { color: #6f6; }
+  .net-row .v.no { color: #f66; }
+  .route-tag { color: #4af; font-size: 0.75rem; margin-left: 6px; }
+  #wifi-list { border-radius: 8px; overflow: hidden; background: #252525; }
+  #wifi-list:empty { display: none; }
+  .wifi-row { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid #1c1c1c; cursor: pointer; font-size: 0.9rem; }
+  .wifi-row:last-child { border-bottom: none; }
+  .wifi-row.selected { background: #0d1f2d; color: #4af; }
+  .wifi-row .bars { color: #4af; min-width: 32px; }
+  .wifi-row .ssid { flex: 1; overflow-wrap: anywhere; }
+  .wifi-row .lock { color: #666; font-size: 0.75rem; }
+  .wifi-form { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  .wifi-form input { width: 100%; }
+  #network-section input[type=password] {
+    width: 100%; background: #252525; border: 1px solid #333; border-radius: 8px;
+    color: #f0f0f0; padding: 12px 14px; font-size: 1rem; outline: none;
+  }
+  #network-section input[type=text] { background: #252525; }
+  #network-section input[type=password]:focus { border-color: #4af; }
+  #wifi-join-status { font-size: 0.85rem; color: #888; min-height: 1.2em; }
+  #wifi-join-status.ok { color: #6f6; }
+  #wifi-join-status.err { color: #f66; }
+  body.local-control #connect-section { display: none; }
   .metric-iface {
     flex: 0 0 auto;
     color: #555;
@@ -464,6 +503,21 @@
       <span id="volume-label">100%</span>
     </div>
   </div>
+
+  <!-- Network -->
+  <div class="section-title" data-daemon-only>Network</div>
+  <div id="network-section" data-daemon-only>
+    <div id="net-status"></div>
+    <label>Wi-Fi</label>
+    <div id="wifi-list"></div>
+    <div class="wifi-form">
+      <button class="secondary" id="wifi-scan-btn" onclick="scanWifi()">Scan</button>
+      <input type="text" id="wifi-ssid" placeholder="Network" autocomplete="off" autocapitalize="none">
+      <input type="password" id="wifi-password" placeholder="Password" autocomplete="off">
+      <button id="wifi-join-btn" onclick="joinWifi()">Join</button>
+      <div id="wifi-join-status"></div>
+    </div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -492,8 +546,14 @@ renderRecentPins();
 loadNexusEvents();
 loadWebcasts();
 
+// Served by the box itself: one device, no PIN.
+const isLocal = !!window.FRC_LOCAL;
+if (isLocal) document.body.classList.add('local-control');
+
 const prePin = new URLSearchParams(location.search).get('pin');
-if (prePin) {
+if (isLocal) {
+  setTimeout(connect, 200);
+} else if (prePin) {
   document.getElementById('pin-input').value = prePin.toUpperCase();
   setTimeout(connect, 200);
 }
@@ -543,22 +603,22 @@ function wsUrl(path) {
 
 function connect() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  const pin = document.getElementById('pin-input').value.trim().toUpperCase();
-  if (!pin || pin.length < 4) { toast('Enter a valid PIN'); return; }
+  const pin = isLocal ? '' : document.getElementById('pin-input').value.trim().toUpperCase();
+  if (!isLocal && (!pin || pin.length < 4)) { toast('Enter a valid PIN'); return; }
   currentPin = pin;
-  history.replaceState(null, '', `?pin=${pin}`);
+  if (!isLocal) history.replaceState(null, '', `?pin=${pin}`);
 
   if (ws) { ws.onclose = null; ws.onerror = null; ws.close(); ws = null; }
 
-  setStatus('connecting', `Connecting (PIN: ${pin})…`);
-  ws = new WebSocket(wsUrl(`/ws/control?pin=${pin}`));
+  setStatus('connecting', isLocal ? 'Connecting…' : `Connecting (PIN: ${pin})…`);
+  ws = new WebSocket(wsUrl(isLocal ? '/ws/control' : `/ws/control?pin=${pin}`));
 
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'device_connected') {
-      saveRecentPin(pin);
+      if (!isLocal) saveRecentPin(pin);
       const kindBadge = msg.kind === 'lite' ? ' (lite)' : '';
-      setStatus('online', `Connected · PIN ${pin}${kindBadge}`);
+      setStatus('online', isLocal ? 'Connected · local' : `Connected · PIN ${pin}${kindBadge}`);
       document.body.classList.remove('ws-offline');
       document.body.classList.toggle('device-lite', msg.kind === 'lite');
       document.getElementById('control-section').style.display = 'block';
@@ -568,8 +628,9 @@ function connect() {
       if (msg.ndiSources) updateNdiSources(msg.ndiSources);
       if (msg.audioSinks) updateAudioSinks(msg.audioSinks, msg.audioState);
       if (msg.metrics) updateMetrics(msg.metrics);
+      if (msg.kind !== 'lite') sendMsg({ type: 'network_status' });
     } else if (msg.type === 'device_disconnected') {
-      setStatus('offline', `Waiting for device (PIN: ${pin})`);
+      setStatus('offline', isLocal ? 'Waiting for device' : `Waiting for device (PIN: ${pin})`);
       document.body.classList.add('ws-offline');
       document.getElementById('vnc-quick-btn').style.display = 'none';
     } else if (msg.type === 'ndi_sources') {
@@ -580,6 +641,12 @@ function connect() {
       updateAudioSinks(msg.sinks, msg.state);
     } else if (msg.type === 'metrics') {
       updateMetrics(msg.metrics);
+    } else if (msg.type === 'network') {
+      updateNetwork(msg);
+    } else if (msg.type === 'wifi_networks') {
+      updateWifiList(msg.networks);
+    } else if (msg.type === 'wifi_join') {
+      updateWifiJoin(msg.ssid, msg.result);
     } else if (msg.type === 'error') {
       toast(msg.message);
     }
@@ -969,6 +1036,73 @@ function updateMetrics(m) {
       <span class="metric-val" style="min-width:auto;color:#fc8">↑ ${fmtKBps(m.net.txKBps)}</span>
       <span class="metric-iface">${m.net.iface}</span>
     </div>`;
+}
+
+// ── Network ───────────────────────────────────────────────────────────────────
+
+let wifiNetworks = [];
+
+function updateNetwork(n) {
+  const rows = (n.interfaces || []).map(i => {
+    const kind = i.kind === 'wifi' ? 'Wi-Fi' : 'Wired';
+    const name = i.kind === 'wifi' && i.ssid ? `${esc(i.ssid)} · ` : '';
+    const route = i.iface === n.defaultIface ? '<span class="route-tag">Route</span>' : '';
+    return `<div class="net-row"><span class="k">${kind}</span><span class="v">${name}${esc(i.ip)} <span style="color:#555">${esc(i.iface)}</span>${route}</span></div>`;
+  });
+  if (!rows.length) rows.push('<div class="net-row"><span class="k">Links</span><span class="v no">None</span></div>');
+  rows.push(`<div class="net-row"><span class="k">Internet</span><span class="v ${n.internet ? 'yes' : 'no'}">${n.internet ? 'Yes' : 'No'}</span></div>`);
+  document.getElementById('net-status').innerHTML = rows.join('');
+}
+
+function scanWifi() {
+  if (!sendMsg({ type: 'wifi_scan' })) return;
+  const btn = document.getElementById('wifi-scan-btn');
+  btn.disabled = true; btn.textContent = 'Scanning…';
+}
+
+function signalBars(s) { return s >= 70 ? '▂▄▆█' : s >= 50 ? '▂▄▆░' : s >= 30 ? '▂▄░░' : '▂░░░'; }
+
+function updateWifiList(networks) {
+  wifiNetworks = networks || [];
+  const btn = document.getElementById('wifi-scan-btn');
+  btn.disabled = false; btn.textContent = 'Scan';
+  const sel = document.getElementById('wifi-ssid').value;
+  document.getElementById('wifi-list').innerHTML = wifiNetworks.length
+    ? wifiNetworks.map((w, i) => `<div class="wifi-row${w.ssid === sel ? ' selected' : ''}" onclick="pickWifi(${i})"><span class="bars">${signalBars(w.signal)}</span><span class="ssid">${esc(w.ssid)}</span>${w.secured ? '<span class="lock">🔒</span>' : ''}</div>`).join('')
+    : '<div class="wifi-row" style="cursor:default;color:#555">No networks</div>';
+}
+
+function pickWifi(i) {
+  const w = wifiNetworks[i];
+  if (!w) return;
+  document.getElementById('wifi-ssid').value = w.ssid;
+  updateWifiList(wifiNetworks);
+  if (w.secured) document.getElementById('wifi-password').focus();
+}
+
+function joinWifi() {
+  const ssid = document.getElementById('wifi-ssid').value.trim();
+  if (!ssid) { toast('Network required'); return; }
+  const password = document.getElementById('wifi-password').value;
+  sendMsg({ type: 'wifi_join', ssid, password });
+}
+
+function updateWifiJoin(ssid, result) {
+  const el = document.getElementById('wifi-join-status');
+  const btn = document.getElementById('wifi-join-btn');
+  const labels = {
+    joining: [`Joining ${ssid}…`, ''],
+    online: [`${ssid} · Online`, 'ok'],
+    local: [`${ssid} · No internet`, 'err'],
+    captive_portal: [`${ssid} · Sign-in page`, 'err'],
+    error: [`${ssid} · Join failed`, 'err'],
+    busy: ['Join in progress', 'err'],
+  };
+  const [text, cls] = labels[result] || [result, ''];
+  el.textContent = text;
+  el.className = cls;
+  btn.disabled = result === 'joining';
+  if (result === 'online' || result === 'local') document.getElementById('wifi-password').value = '';
 }
 
 function openVnc() {

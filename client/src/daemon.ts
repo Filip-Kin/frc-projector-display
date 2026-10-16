@@ -27,10 +27,10 @@ import {
 import { initOutputs, setOnOutputsChanged } from './outputs.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
-import { localServer, httpsServer, LOCAL_PORT, enterApMode, initServer, stopProvisioningExtras } from './local-server.js';
-import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp, hasLocalLink } from './network.js';
+import { localServer, httpServer80, httpsServer, LOCAL_PORT, enterApMode, initServer, stopProvisioningExtras, applyCredentials, setPort80Up } from './local-server.js';
+import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp, hasLocalLink, getNetworkSnapshot } from './network.js';
 import { emit, initLocalControl, attachLocalControl, hasLocalControllers } from './control.js';
-import { checkInternet } from './wifi.js';
+import { checkInternet, scanWifi } from './wifi.js';
 import { startNetworkMonitor } from './network-monitor.js';
 import { sampleMetrics } from './metrics.js';
 import {
@@ -246,6 +246,24 @@ async function handleCommand(msg: any) {
       recordAudio({ muted: !!msg.muted });
       execFile('pactl', ['set-sink-mute', '@DEFAULT_SINK@', msg.muted ? '1' : '0'], { env: process.env }, () => {});
       break;
+    case 'network_status':
+      emit({ type: 'network', ...(await getNetworkSnapshot()) });
+      break;
+    case 'wifi_scan':
+      emit({ type: 'wifi_networks', networks: await scanWifi().catch(() => []) });
+      break;
+    case 'wifi_join': {
+      const ssid = String(msg.ssid ?? '').trim();
+      if (!ssid) break;
+      if (state.applyingCredentials) { emit({ type: 'wifi_join', ssid, result: 'busy' }); break; }
+      emit({ type: 'wifi_join', ssid, result: 'joining' });
+      // Same pipeline as the setup page: join, check the server, then offline
+      // mode or a fresh server connection (and update) as the result decides.
+      const r = await applyCredentials(ssid, String(msg.password ?? ''), 'control');
+      emit({ type: 'wifi_join', ssid, result: r.kind });
+      emit({ type: 'network', ...(await getNetworkSnapshot()) });
+      break;
+    }
   }
 }
 
@@ -406,7 +424,7 @@ async function refreshNdiSources() {
 // Offline mode. The box has an address on some network but cannot reach the
 // server: an AV VLAN, a venue LAN with no uplink, a laptop on a direct cable.
 // Play the saved outputs and stay put; a local controller can reach it at
-// http://<host>.local:3000/control. The setup hotspot is only for a box with
+// http://<host>.local/control. The setup hotspot is only for a box with
 // no network at all.
 async function stayOfflineIfLinked(why: string): Promise<boolean> {
   if (!(await hasLocalLink())) return false;
@@ -501,14 +519,14 @@ setOnOutputsChanged(() => {
   emit({ type: 'outputs_changed', outputs: outputsForRegister() });
 });
 
-initLocalControl(PIN, handleCommand, () => ({
+initLocalControl(handleCommand, () => ({
   outputs: outputsForRegister(),
   ndiSources: lastNdiSources,
   audioSinks: lastAudioSinks,
   audioState: lastAudioState,
   metrics: lastMetrics,
 }));
-attachLocalControl([localServer, httpsServer]);
+attachLocalControl([localServer, httpServer80, httpsServer]);
 
 // NDI discovery and metrics run whether or not the server is reachable, so a
 // local controller sees live sources on a network with no internet.
@@ -528,6 +546,12 @@ localServer.listen(LOCAL_PORT, '::', () => {
     if (!state.wsEverConnected && !hasReplayedOnce) cdpNavigateAll(`http://localhost:${LOCAL_PORT}/connecting`).catch(() => {});
   }, 3000);
 });
+
+// Port 80 as well, so the controller is http://<ip>/control. Needs
+// net.ipv4.ip_unprivileged_port_start <= 80 (install.sh); a box that has not
+// run that installer yet keeps working on 3000 only.
+httpServer80.on('error', (err: Error) => log('warn', `[daemon] port 80: ${err.message}`));
+httpServer80.listen(80, '::', () => { setPort80Up(); log('info', '[daemon] local HTTP server on port 80'); });
 
 if (httpsServer) {
   httpsServer.listen(4443, '::', () => log('info', '[daemon] local HTTPS server on port 4443'));

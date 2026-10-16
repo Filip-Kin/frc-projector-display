@@ -633,6 +633,9 @@ async function clearProvisioningStatus() {
 }
 
 export const localServer = createServer(app);
+export const httpServer80 = createServer(app);
+let port80Up = false;
+export function setPort80Up() { port80Up = true; }
 
 // HTTPS listener on port 4443 (iptables NATs 443→4443 in AP mode).
 // Even with a self-signed cert that Android rejects at TLS handshake,
@@ -854,10 +857,11 @@ async function buildLocalQrPage() {
   const addrs = await getLocalAddresses(true).catch(() => []);
   const host = `${osHostname()}.local`;
   const primary = addrs.find(a => !a.ip.startsWith('169.254.'))?.ip ?? host;
-  const controlUrl = `http://${primary}:${LOCAL_PORT}/control?pin=${PIN}`;
+  const port = port80Up ? '' : `:${LOCAL_PORT}`;
+  const controlUrl = `http://${primary}${port}/control`;
   const qr = await QRCode.toDataURL(controlUrl, { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
   const rows = [
-    `<div><span class="ik">host</span> <span class="iv">${host}:${LOCAL_PORT}</span></div>`,
+    `<div><span class="ik">host</span> <span class="iv">${host}${port}</span></div>`,
     ...addrs.map(a => `<div><span class="ik">${a.iface}</span> <span class="iv">${a.ip}</span></div>`),
   ].join('');
   return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>FRC Display</title>
@@ -866,8 +870,7 @@ async function buildLocalQrPage() {
 <h1>Configure Display</h1>
 <div class="badge">Offline · local control</div>
 <div class="qr-box"><img src="${qr}" alt="QR"></div>
-<div><div class="pin-label">PIN</div><div class="pin">${PIN}</div></div>
-<div class="url">${controlUrl.replace(/\?.*/, '')}</div>
+<div class="url">${controlUrl}</div>
 <div class="info">${rows}</div>
 <div class="version">v${VERSION}</div>
 <script>

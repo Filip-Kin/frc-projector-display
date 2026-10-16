@@ -18,10 +18,8 @@ type SnapshotFn = () => object;
 
 let onCommand: CommandHandler = async () => {};
 let snapshot: SnapshotFn = () => ({});
-let pin = '';
 
-export function initLocalControl(p: string, handler: CommandHandler, snap: SnapshotFn) {
-  pin = p.toUpperCase();
+export function initLocalControl(handler: CommandHandler, snap: SnapshotFn) {
   onCommand = handler;
   snapshot = snap;
 }
@@ -45,15 +43,8 @@ export function attachLocalControl(servers: (HttpServer | HttpsServer | null)[])
     server?.on('upgrade', (req, socket, head) => {
       const url = new URL(req.url ?? '/', 'http://local');
       if (url.pathname !== '/ws/control') { socket.destroy(); return; }
+      // No PIN on this path: reaching the box's own port already picks the box.
       wss.handleUpgrade(req, socket, head, ws => {
-        const given = (url.searchParams.get('pin') ?? '').toUpperCase();
-        if (given !== pin) {
-          // Same shape the public server uses for an unknown PIN, so the
-          // page shows "waiting" instead of reconnecting in a tight loop.
-          ws.send(JSON.stringify({ type: 'error', message: 'Wrong PIN' }));
-          ws.send(JSON.stringify({ type: 'device_disconnected' }));
-          return;
-        }
         localControllers.add(ws);
         console.log(`[local-control] controller connected (${localControllers.size} open)`);
         ws.send(JSON.stringify({ type: 'device_connected', kind: 'daemon', local: true, ...snapshot() }));

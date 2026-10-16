@@ -13,7 +13,7 @@ set -e
 # compares it with /etc/frc-display/install-rev at boot and re-runs the
 # installer (frc-install) when it is newer, so helper-script and system fixes
 # reach boxes already in the field, not just new installs.
-INSTALL_REV=6
+INSTALL_REV=7
 
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
@@ -616,8 +616,15 @@ systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 
 pkill -HUP -x systemd-logind 2>/dev/null || true
 
 # ── Local control reachability ────────────────────────────────────────────────
-# With no internet the daemon serves its controller at http://<host>.local:3000
-# (offline mode). mDNS makes the name resolve on the local network.
+# With no internet the daemon serves its controller at http://<host>.local/control
+# (offline mode). mDNS makes the name resolve on the local network. The daemon
+# runs as ${SERVICE_USER} and listens on 80 as well as 3000; letting unprivileged
+# processes bind from 80 up is the whole of what that needs (no root daemon, no
+# NAT rule, and it covers IPv6, which an iptables REDIRECT would not).
+cat > /etc/sysctl.d/60-frc-port80.conf << 'EOF'
+net.ipv4.ip_unprivileged_port_start=80
+EOF
+sysctl -q -p /etc/sysctl.d/60-frc-port80.conf 2>/dev/null || true
 echo "[16] Enabling mDNS..."
 mkdir -p /etc/avahi/services
 cat > /etc/avahi/services/frc-display.service << 'EOF'
@@ -625,7 +632,7 @@ cat > /etc/avahi/services/frc-display.service << 'EOF'
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
   <name replace-wildcards="yes">FRC Display %h</name>
-  <service><type>_http._tcp</type><port>3000</port><txt-record>path=/control</txt-record></service>
+  <service><type>_http._tcp</type><port>80</port><txt-record>path=/control</txt-record></service>
 </service-group>
 EOF
 systemctl enable --now avahi-daemon 2>/dev/null || true
