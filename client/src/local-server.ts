@@ -132,6 +132,12 @@ app.get('/', async (req, res) => {
     }
     return res.send(await buildApPageAsync());
   }
+  // Anyone but the box's own kiosk Chromium (which loads localhost) gets the
+  // controller: http://<box ip>/ is the control page.
+  const from = (req.socket.remoteAddress ?? '').replace('::ffff:', '');
+  if (from !== '127.0.0.1' && from !== '::1') {
+    return res.redirect(302, '/control');
+  }
   // Server unreachable (offline mode): render the QR page here, pointing at
   // this box's own controller instead of the public one.
   if (state.serverWs?.readyState !== WebSocket.OPEN) {
@@ -858,7 +864,7 @@ async function buildLocalQrPage() {
   const host = `${osHostname()}.local`;
   const primary = addrs.find(a => !a.ip.startsWith('169.254.'))?.ip ?? host;
   const port = port80Up ? '' : `:${LOCAL_PORT}`;
-  const controlUrl = `http://${primary}${port}/control`;
+  const controlUrl = `http://${primary}${port}/`;
   const qr = await QRCode.toDataURL(controlUrl, { width: 320, margin: 2, color: { dark: '#000', light: '#fff' } });
   const rows = [
     `<div><span class="ik">host</span> <span class="iv">${host}${port}</span></div>`,
