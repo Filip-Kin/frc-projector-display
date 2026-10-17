@@ -216,7 +216,8 @@
     margin-bottom: 14px;
   }
   #screen-tabs.hidden { display: none; }
-  .mode-btn.hidden { display: none; }
+  #screen-layout { margin-bottom: 8px; }
+  #screen-layout.hidden { display: none; }
   .screen-tab {
     flex: 1;
     background: #1c1c1c;
@@ -354,6 +355,10 @@
 </div>
 
 <div id="control-section">
+  <div id="screen-layout" class="seg hidden" data-daemon-only>
+    <button type="button" class="secondary" id="layout-individual" onclick="setLayout('individual')">Individual</button>
+    <button type="button" class="secondary" id="layout-mirror" onclick="setLayout('mirror')">Mirror</button>
+  </div>
   <div id="screen-tabs" class="hidden"></div>
   <div class="section-title">Display Mode</div>
   <div class="mode-grid">
@@ -378,17 +383,8 @@
     <div class="mode-btn" id="mode-queuing" onclick="selectMode('queuing')" style="grid-column: span 2">
       <span class="icon">📺</span>Queuing + Stream
     </div>
-    <div class="mode-btn hidden" id="mode-mirror" onclick="selectMode('mirror')" style="grid-column: span 2" data-daemon-only>
-      <span class="icon">🪞</span>Mirror
-    </div>
   </div>
 
-  <!-- Mirror config -->
-  <div class="mode-config" id="config-mirror" data-daemon-only>
-    <label>Mirror of</label>
-    <select id="mirror-source-select"></select>
-    <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
-  </div>
 
   <!-- NDI / OMT config -->
   <div class="mode-config" id="config-ndi">
@@ -708,11 +704,17 @@ function sendMsg(msg) {
 function updateOutputs(list) {
   outputs = list || [];
   const el = document.getElementById('screen-tabs');
-  document.getElementById('mode-mirror').classList.toggle('hidden', outputs.length <= 1);
-  populateMirrorSources();
-  if (outputs.length <= 1) {
+  // Mirror: every other screen copies Screen 1, so only Screen 1 has settings.
+  const mirrored = outputs.slice(1).some(o => o.mirrorOf);
+  const layout = document.getElementById('screen-layout');
+  layout.classList.toggle('hidden', outputs.length <= 1);
+  document.getElementById('layout-individual').classList.toggle('on', !mirrored);
+  document.getElementById('layout-mirror').classList.toggle('on', mirrored);
+  layout.querySelectorAll('button').forEach(b => b.disabled = false);
+  if (outputs.length <= 1 || mirrored) {
     el.classList.add('hidden');
     currentOutput = outputs[0]?.id || null;
+    showOutputState(currentOutput);
     return;
   }
   el.classList.remove('hidden');
@@ -723,35 +725,89 @@ function updateOutputs(list) {
   showOutputState(currentOutput);
 }
 
-// Every screen but the selected one.
-function populateMirrorSources() {
-  const sel = document.getElementById('mirror-source-select');
-  const prev = sel.value;
-  const others = outputs.map((o, i) => ({ o, i })).filter(({ o }) => o.id !== currentOutput);
-  sel.innerHTML = others.map(({ o, i }) => `<option value="${o.id}">Screen ${i+1} · ${o.id}</option>`).join('');
-  if (others.some(({ o }) => o.id === prev)) sel.value = prev;
+function setLayout(layout) {
+  if (!sendMsg({ type: 'set_layout', layout })) return;
+  document.querySelectorAll('#screen-layout button').forEach(b => b.disabled = true);
 }
 
 function selectOutput(id) {
   currentOutput = id;
-  populateMirrorSources();
   document.querySelectorAll('.screen-tab').forEach(t => t.classList.remove('active'));
   Array.from(document.querySelectorAll('.screen-tab')).find(t => t.textContent.includes(id))?.classList.add('active');
   showOutputState(id);
 }
 
 function showOutputState(id) {
-  // Reflect this output's last-applied mode in the UI (if any).
-  // Modes that haven't been touched on this output show no active selection.
+  // The screen's current setting from the box: that mode selected, its fields filled in.
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.mode-config').forEach(c => c.classList.remove('visible'));
-  selectedMode = null;
-  const s = outputState[id];
-  if (s?.mode) {
-    selectedMode = s.mode;
-    document.getElementById('mode-' + s.mode)?.classList.add('active');
-    const cfg = document.getElementById('config-' + s.mode);
-    if (cfg) cfg.classList.add('visible');
+  if (ndiRefreshTimer) { clearInterval(ndiRefreshTimer); ndiRefreshTimer = null; }
+  const o = outputs.find(x => x.id === id);
+  const mode = fillFromRecord(o?.current) ?? outputState[id]?.mode ?? null;
+  selectedMode = mode;
+  if (!mode) return;
+  document.getElementById('mode-' + mode)?.classList.add('active');
+  document.getElementById('config-' + mode)?.classList.add('visible');
+  if (mode === 'ndi' || mode === 'queuing') {
+    sendMsg({ type: 'refresh_ndi' });
+    ndiRefreshTimer = setInterval(() => sendMsg({ type: 'refresh_ndi' }), 20000);
+  }
+}
+
+// Selects value in a <select>, adding it when the list does not have it (a source not discovered
+// yet, an event not in the loaded list).
+function setSelectValue(id, value) {
+  const sel = document.getElementById(id);
+  if (!sel || value == null || value === '') return;
+  if (![...sel.options].some(o => o.value === value)) sel.add(new Option(value, value));
+  sel.value = value;
+}
+
+// Fills the mode's fields from a saved setting; returns the mode button to select.
+function fillFromRecord(rec) {
+  if (!rec) return null;
+  const val = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+  switch (rec.mode) {
+    case 'home': return 'home';
+    case 'ndi':
+      setSelectValue('ndi-source-select', rec.source);
+      updateQualityOptions();
+      val('ndi-bandwidth', rec.bandwidth || 'high');
+      return 'ndi';
+    case 'chromium': {
+      let u; try { u = new URL(rec.url); } catch { return null; }
+      if (u.hostname === 'fim-queueing.web.app') { val('fim-key', u.searchParams.get('key') || ''); return 'fim'; }
+      const nx = u.hostname === 'frc.nexus' && u.pathname.match(/\/event\/([^/]+)\/display\/pit/);
+      if (nx) {
+        val('nexus-event-input', nx[1]);
+        if (document.getElementById('nexus-event-select').style.display !== 'none') setSelectValue('nexus-event-select', nx[1]);
+        return 'nexus';
+      }
+      if ((u.hostname === 'localhost' || u.hostname === '127.0.0.1') && u.pathname === '/youtube') {
+        const ev = u.searchParams.get('event'), ch = u.searchParams.get('channel');
+        if (ev) setSelectValue('youtube-webcast-select', 'event:' + ev);
+        else if (ch) setSelectValue('youtube-webcast-select', 'channel:' + ch);
+        else { val('youtube-webcast-select', ''); val('youtube-id', u.searchParams.get('v') || ''); }
+        onYoutubeWebcastChange('youtube');
+        return 'youtube';
+      }
+      val('custom-url', rec.url);
+      return 'url';
+    }
+    case 'queuing': {
+      val('queuing-event-input', rec.eventKey);
+      if (document.getElementById('queuing-event-select').style.display !== 'none') setSelectValue('queuing-event-select', rec.eventKey);
+      setQueuingStream(rec.streamType === 'ndi' ? 'ndi' : 'youtube');
+      if (rec.streamType === 'ndi') setSelectValue('queuing-ndi-select', rec.streamSource);
+      else if (/^(event|channel):/.test(rec.streamSource || '')) setSelectValue('queuing-webcast-select', rec.streamSource);
+      else { val('queuing-webcast-select', ''); val('queuing-youtube-id', rec.streamSource || ''); }
+      onYoutubeWebcastChange('queuing');
+      setQueuingSize(rec.streamSize === 60 ? 60 : 70);
+      val('queuing-sidebar', rec.sidebar || 'matches');
+      val('queuing-bottom', rec.bottom || 'updates');
+      return 'queuing';
+    }
+    default: return null;
   }
 }
 
@@ -890,12 +946,6 @@ function applyMode() {
               sidebar, bottom };
       break;
     }
-    case 'mirror': {
-      const src = document.getElementById('mirror-source-select').value;
-      if (!src) { toast('Select a screen'); return; }
-      msg = { type: 'set_mode', mode: 'mirror', mirrorOf: src };
-      break;
-    }
     default: toast('Select a mode first'); return;
   }
   msg.output = currentOutput;
@@ -919,6 +969,8 @@ function updateNdiSources(sources) {
     : '<option value="">-- no sources found --</option>';
   const prevValid = ndiSources.some(s => (typeof s === 'object' ? s.value : s) === prev);
   if (prev && prevValid) sel.value = prev;
+  // The source the screen is playing stays selected even when discovery misses it this round.
+  else if (prev && prev === outputs.find(o => o.id === currentOutput)?.current?.source) setSelectValue('ndi-source-select', prev);
   updateQualityOptions();
   if (selectedMode === 'queuing' && queuingStream === 'ndi') populateQueuingNdi();
 }

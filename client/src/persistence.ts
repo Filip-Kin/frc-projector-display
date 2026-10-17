@@ -14,6 +14,8 @@ export interface OutputModeRecord {
   mode: 'home' | 'chromium' | 'ndi' | 'queuing' | 'mirror';
   url?: string;
   mirrorOf?: string;
+  // mode 'mirror': what the screen showed before, put back when the layout returns to Individual.
+  before?: OutputModeRecord;
   source?: string;
   bandwidth?: 'high' | 'medium' | 'low';
   eventKey?: string;

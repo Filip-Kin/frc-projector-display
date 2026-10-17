@@ -36,7 +36,7 @@ import { startNetworkMonitor } from './network-monitor.js';
 import { sampleMetrics } from './metrics.js';
 import {
   loadState, initState, recordOutputMode, recordAudio,
-  getPersistedOutputs, getPersistedAudio,
+  getPersistedOutputs, getPersistedAudio, type OutputModeRecord,
 } from './persistence.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -142,30 +142,52 @@ async function replayPersistedOutputs() {
   log('info', `[state] replaying ${Object.keys(recs).length} output mode(s) from disk`);
   for (const o of state.outputs) {
     const r = recs[o.id]; if (!r) continue;
-    try {
-      if (r.mode === 'home')                                       await setHomeOnOutput(o.id);
-      else if (r.mode === 'chromium' && r.url)                     await setChromiumOnOutput(o.id, r.url);
-      else if (r.mode === 'ndi' && r.source)                       setNdiOnOutput(o.id, r.source, r.bandwidth ?? 'high');
-      else if (r.mode === 'mirror' && r.mirrorOf)                  await setMirrorOnOutput(o.id, r.mirrorOf);
-      else if (r.mode === 'queuing' && r.eventKey)                 await setQueuingOnOutput(
-        o.id, r.eventKey,
-        r.streamType === 'ndi' ? 'ndi' : 'youtube',
-        r.streamSource ?? '', r.streamSize ?? 70,
-        r.sidebar ?? 'matches', r.bottom ?? 'updates',
-      );
-    } catch (err: any) {
-      log('error', `[state] replay failed for ${o.id}: ${err.message}`);
-    }
+    try { await applyRecord(o.id, r); }
+    catch (err: any) { log('error', `[state] replay failed for ${o.id}: ${err.message}`); }
   }
 }
 
-// Starts every full-screen stream player again on its saved source.
-async function restartStreams() {
+// Puts one saved mode on an output. Mirror refusals come back as a label, else null.
+async function applyRecord(id: string, r: OutputModeRecord): Promise<string | null> {
+  if (r.mode === 'home')                       await setHomeOnOutput(id);
+  else if (r.mode === 'chromium' && r.url)     await setChromiumOnOutput(id, r.url);
+  else if (r.mode === 'ndi' && r.source)       setNdiOnOutput(id, r.source, r.bandwidth ?? 'high');
+  else if (r.mode === 'mirror' && r.mirrorOf)  return setMirrorOnOutput(id, r.mirrorOf);
+  else if (r.mode === 'queuing' && r.eventKey) await setQueuingOnOutput(
+    id, r.eventKey,
+    r.streamType === 'ndi' ? 'ndi' : 'youtube',
+    r.streamSource ?? '', r.streamSize ?? 70,
+    r.sidebar ?? 'matches', r.bottom ?? 'updates',
+  );
+  return null;
+}
+
+// Individual: every screen its own mode. Mirror: every screen copies Screen 1 (the first output),
+// keeping what it showed before so Individual can put it back.
+async function setLayout(layout: 'individual' | 'mirror') {
+  const [first, ...rest] = state.outputs;
+  if (!first) return;
   const recs = getPersistedOutputs();
-  for (const o of state.outputs) {
-    const r = recs[o.id];
-    if (r?.mode === 'ndi' && r.source && o.mode === 'ndi') setNdiOnOutput(o.id, r.source, r.bandwidth ?? 'high');
+  if (layout === 'mirror' && first.mode === 'mirror') {
+    // Screen 1 must show its own picture to be the source.
+    const before = recs[first.id]?.before ?? { mode: 'home' as const };
+    await applyRecord(first.id, before);
+    recordOutputMode(first.id, before);
   }
+  for (const o of rest) {
+    const prev = recs[o.id];
+    if (layout === 'mirror') {
+      if (o.mode === 'mirror' && o.mirrorOf === first.id) continue;
+      const refused = await setMirrorOnOutput(o.id, first.id);
+      if (refused) { emit({ type: 'error', message: refused }); continue; }
+      recordOutputMode(o.id, { mode: 'mirror', mirrorOf: first.id, before: prev?.mode === 'mirror' ? prev.before : prev });
+    } else if (o.mode === 'mirror') {
+      const before = prev?.before ?? { mode: 'home' as const };
+      await applyRecord(o.id, before);
+      recordOutputMode(o.id, before);
+    }
+  }
+  log('info', `[outputs] layout ${layout}`);
 }
 
 state.forceWsReconnect = () => {
@@ -180,8 +202,14 @@ state.forceWsReconnect = () => {
   connectToServer();
 };
 
+// Each output with what it is set to show, so a controller can show the current setting.
 function outputsForRegister() {
-  return state.outputs.map(o => ({ id: o.id, width: o.width, height: o.height }));
+  const recs = getPersistedOutputs();
+  return state.outputs.map(o => ({
+    id: o.id, width: o.width, height: o.height,
+    mirrorOf: o.mode === 'mirror' ? o.mirrorOf : undefined,
+    current: recs[o.id] ?? null,
+  }));
 }
 
 // Snapshot of what each output is currently showing — sent in heartbeats so
@@ -209,10 +237,6 @@ async function handleCommand(msg: any) {
       } else if (msg.mode === 'ndi' && msg.source) {
         setNdiOnOutput(outputId, msg.source, msg.bandwidth ?? 'high');
         recordOutputMode(outputId, { mode: 'ndi', source: msg.source, bandwidth: msg.bandwidth ?? 'high' });
-      } else if (msg.mode === 'mirror' && msg.mirrorOf) {
-        const refused = await setMirrorOnOutput(outputId, String(msg.mirrorOf));
-        if (refused) { emit({ type: 'error', message: refused }); break; }
-        recordOutputMode(outputId, { mode: 'mirror', mirrorOf: String(msg.mirrorOf) });
       } else if (msg.mode === 'queuing' && msg.eventKey) {
         const streamType = msg.streamType === 'ndi' ? 'ndi' : 'youtube';
         const streamSize = msg.streamSize === 60 ? 60 : 70;
@@ -228,8 +252,13 @@ async function handleCommand(msg: any) {
           streamSize, sidebar, bottom,
         });
       }
+      emit({ type: 'outputs_changed', outputs: outputsForRegister() });
       break;
     }
+    case 'set_layout':
+      if (msg.layout === 'mirror' || msg.layout === 'individual') await setLayout(msg.layout);
+      emit({ type: 'outputs_changed', outputs: outputsForRegister() });
+      break;
     case 'refresh_ndi': {
       await refreshNdiSources();
       break;
