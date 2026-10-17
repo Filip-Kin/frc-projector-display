@@ -21,7 +21,7 @@ import { hostname as osHostname, uptime as osUptime } from 'os';
 import { state, isAnyNdiActive } from './state.js';
 import { cdpNavigate, cdpNavigateAll } from './cdp.js';
 import {
-  setHomeOnOutput, setChromiumOnOutput, setNdiOnOutput, setQueuingOnOutput,
+  setHomeOnOutput, setChromiumOnOutput, setNdiOnOutput, setQueuingOnOutput, setMirrorOnOutput,
   setHomeAll, setVnc, setPin,
 } from './modes.js';
 import { initOutputs, setOnOutputsChanged } from './outputs.js';
@@ -145,6 +145,7 @@ async function replayPersistedOutputs() {
       if (r.mode === 'home')                                       await setHomeOnOutput(o.id);
       else if (r.mode === 'chromium' && r.url)                     await setChromiumOnOutput(o.id, r.url);
       else if (r.mode === 'ndi' && r.source)                       setNdiOnOutput(o.id, r.source, r.bandwidth ?? 'high');
+      else if (r.mode === 'mirror' && r.mirrorOf)                  await setMirrorOnOutput(o.id, r.mirrorOf);
       else if (r.mode === 'queuing' && r.eventKey)                 await setQueuingOnOutput(
         o.id, r.eventKey,
         r.streamType === 'ndi' ? 'ndi' : 'youtube',
@@ -198,6 +199,10 @@ async function handleCommand(msg: any) {
       } else if (msg.mode === 'ndi' && msg.source) {
         setNdiOnOutput(outputId, msg.source, msg.bandwidth ?? 'high');
         recordOutputMode(outputId, { mode: 'ndi', source: msg.source, bandwidth: msg.bandwidth ?? 'high' });
+      } else if (msg.mode === 'mirror' && msg.mirrorOf) {
+        const refused = await setMirrorOnOutput(outputId, String(msg.mirrorOf));
+        if (refused) { emit({ type: 'error', message: refused }); break; }
+        recordOutputMode(outputId, { mode: 'mirror', mirrorOf: String(msg.mirrorOf) });
       } else if (msg.mode === 'queuing' && msg.eventKey) {
         const streamType = msg.streamType === 'ndi' ? 'ndi' : 'youtube';
         const streamSize = msg.streamSize === 60 ? 60 : 70;

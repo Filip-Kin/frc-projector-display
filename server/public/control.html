@@ -216,6 +216,7 @@
     margin-bottom: 14px;
   }
   #screen-tabs.hidden { display: none; }
+  .mode-btn.hidden { display: none; }
   .screen-tab {
     flex: 1;
     background: #1c1c1c;
@@ -373,6 +374,16 @@
     <div class="mode-btn" id="mode-queuing" onclick="selectMode('queuing')" style="grid-column: span 2">
       <span class="icon">📺</span>Queuing + Stream
     </div>
+    <div class="mode-btn hidden" id="mode-mirror" onclick="selectMode('mirror')" style="grid-column: span 2" data-daemon-only>
+      <span class="icon">🪞</span>Mirror
+    </div>
+  </div>
+
+  <!-- Mirror config -->
+  <div class="mode-config" id="config-mirror" data-daemon-only>
+    <label>Mirror of</label>
+    <select id="mirror-source-select"></select>
+    <div class="apply-row"><button onclick="applyMode()">Apply</button></div>
   </div>
 
   <!-- NDI / OMT config -->
@@ -681,6 +692,8 @@ function sendMsg(msg) {
 function updateOutputs(list) {
   outputs = list || [];
   const el = document.getElementById('screen-tabs');
+  document.getElementById('mode-mirror').classList.toggle('hidden', outputs.length <= 1);
+  populateMirrorSources();
   if (outputs.length <= 1) {
     el.classList.add('hidden');
     currentOutput = outputs[0]?.id || null;
@@ -694,8 +707,18 @@ function updateOutputs(list) {
   showOutputState(currentOutput);
 }
 
+// Every screen but the selected one.
+function populateMirrorSources() {
+  const sel = document.getElementById('mirror-source-select');
+  const prev = sel.value;
+  const others = outputs.map((o, i) => ({ o, i })).filter(({ o }) => o.id !== currentOutput);
+  sel.innerHTML = others.map(({ o, i }) => `<option value="${o.id}">Screen ${i+1} · ${o.id}</option>`).join('');
+  if (others.some(({ o }) => o.id === prev)) sel.value = prev;
+}
+
 function selectOutput(id) {
   currentOutput = id;
+  populateMirrorSources();
   document.querySelectorAll('.screen-tab').forEach(t => t.classList.remove('active'));
   Array.from(document.querySelectorAll('.screen-tab')).find(t => t.textContent.includes(id))?.classList.add('active');
   showOutputState(id);
@@ -849,6 +872,12 @@ function applyMode() {
       msg = { type: 'set_mode', mode: 'queuing', eventKey,
               streamType: queuingStream, streamSource, streamSize: queuingSize,
               sidebar, bottom };
+      break;
+    }
+    case 'mirror': {
+      const src = document.getElementById('mirror-source-select').value;
+      if (!src) { toast('Select a screen'); return; }
+      msg = { type: 'set_mode', mode: 'mirror', mirrorOf: src };
       break;
     }
     default: toast('Select a mode first'); return;

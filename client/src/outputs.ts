@@ -1,7 +1,7 @@
 import { spawn, exec, ChildProcess } from 'child_process';
 import { readFileSync, existsSync } from 'fs';
 import { state, OutputState } from './state.js';
-import { cdpNavigate } from './cdp.js';
+import { cdpNavigate, cdpGet } from './cdp.js';
 
 const CDP_PORT_RANGE = { start: 9222, end: 9230 };
 const LOCAL_PORT = parseInt(process.env.LOCAL_PORT ?? '3000', 10);
@@ -12,20 +12,24 @@ interface XrandrOutput {
   primary: boolean;
   width: number;
   height: number;
+  x: number;
+  y: number;
 }
 
 function parseXrandrQuery(stdout: string): XrandrOutput[] {
   const out: XrandrOutput[] = [];
   for (const line of stdout.split('\n')) {
-    const m = line.match(/^(\S+)\s+(connected|disconnected)(\s+primary)?(?:\s+(\d+)x(\d+))?/);
+    const m = line.match(/^(\S+)\s+(connected|disconnected)(\s+primary)?(?:\s+(\d+)x(\d+)\+(\d+)\+(\d+))?/);
     if (!m) continue;
-    const [, id, status, primary, w, h] = m;
+    const [, id, status, primary, w, h, x, y] = m;
     out.push({
       id,
       connected: status === 'connected',
       primary: !!primary,
       width: w ? parseInt(w) : 1920,
       height: h ? parseInt(h) : 1080,
+      x: x ? parseInt(x) : 0,
+      y: y ? parseInt(y) : 0,
     });
   }
   return out;
@@ -44,12 +48,62 @@ async function xrandrQuery(): Promise<XrandrOutput[]> {
   return parseXrandrQuery(stdout);
 }
 
+interface OutputModes {
+  mm: { w: number; h: number } | null;          // physical size from the EDID
+  modes: { w: number; h: number; preferred: boolean }[];
+}
+
+// Every output's modes and physical size, from `xrandr --query`.
+async function xrandrModeInfo(): Promise<Map<string, OutputModes>> {
+  const info = new Map<string, OutputModes>();
+  let cur: OutputModes | null = null;
+  for (const line of (await run('xrandr', ['--query'])).split('\n')) {
+    const head = line.match(/^(\S+)\s+(?:connected|disconnected)/);
+    if (head) {
+      const mm = line.match(/(\d+)mm x (\d+)mm\s*$/);
+      cur = { mm: mm && +mm[1] > 0 && +mm[2] > 0 ? { w: +mm[1], h: +mm[2] } : null, modes: [] };
+      info.set(head[1], cur);
+      continue;
+    }
+    const m = line.match(/^\s+(\d+)x(\d+)\S*\s+(.*)$/);
+    if (m && cur) cur.modes.push({ w: +m[1], h: +m[2], preferred: m[3].includes('+') });
+  }
+  return info;
+}
+
+// The mode an output should run: its preferred mode, or, when the EDID marks none, the largest
+// mode with the screen's physical shape. xrandr --auto takes the first listed mode then, which on
+// filip-display-1's 16:9 HDMI panel was 1600x1200 and stretched the picture sideways.
+function pickMode(m: OutputModes | undefined): { w: number; h: number } | null {
+  if (!m?.modes.length) return null;
+  const pref = m.modes.find(x => x.preferred);
+  if (pref) return pref;
+  if (m.mm) {
+    const shape = m.mm.w / m.mm.h;
+    const fits = m.modes.filter(x => Math.abs(x.w / x.h - shape) / shape < 0.05);
+    if (fits.length) return fits.reduce((a, b) => (b.w * b.h > a.w * a.h ? b : a));
+  }
+  return m.modes[0];
+}
+
+// xrandr arguments that light an output in its picked mode; sets o.width/o.height to it.
+function modeArgs(o: { id: string; width: number; height: number }, info: Map<string, OutputModes>): string[] {
+  const mode = pickMode(info.get(o.id));
+  if (!mode) return ['--output', o.id, '--auto'];
+  o.width = mode.w; o.height = mode.h;
+  return ['--output', o.id, '--mode', `${mode.w}x${mode.h}`];
+}
+
 async function applyVerticalLayout(outputs: XrandrOutput[]): Promise<void> {
   // Stack connected monitors vertically: y offsets accumulate; widths share
   // x=0. VNC then captures one tall framebuffer that's natural to view on a
-  // portrait phone.
+  // portrait phone. Offsets come from the mode each output is about to get, not the one it had
+  // (a 1200-line HDMI over VGA placed at +0+1080 overlapped it by 120 lines).
   let y = 0;
-  const args = ['xrandr'];
+  const args: string[] = [];
+  // Undo the scaling a mirror leaves behind (X keeps it across daemon restarts). Separate call,
+  // errors ignored: a driver without transforms must not stop the layout.
+  for (const o of outputs) await run('xrandr', ['--output', o.id, '--scale', '1x1']).catch(() => {});
   // Disable disconnected outputs to keep framebuffer minimal
   const all = await xrandrQuery();
   for (const o of all) {
@@ -57,15 +111,14 @@ async function applyVerticalLayout(outputs: XrandrOutput[]): Promise<void> {
       args.push('--output', o.id, '--off');
     }
   }
+  const info = await xrandrModeInfo();
   for (let i = 0; i < outputs.length; i++) {
     const o = outputs[i];
-    args.push('--output', o.id, '--auto', '--pos', `0x${y}`);
+    args.push(...modeArgs(o, info), '--pos', `0x${y}`);
     if (i === 0) args.push('--primary');
     y += o.height;
   }
-  await new Promise<void>((resolve, reject) => {
-    exec(args.join(' '), { env: process.env }, (err) => err ? reject(err) : resolve());
-  });
+  await run('xrandr', args);
 }
 
 function pickFreeCdpPort(): number {
@@ -217,7 +270,7 @@ async function addOutput(id: string): Promise<void> {
   if (!x) { console.log(`[outputs] addOutput: ${id} not yet visible to xrandr`); return; }
   const yOffset = state.outputs.reduce((s, o) => s + o.height, 0);
   try {
-    await run('xrandr', ['--output', id, '--auto', '--pos', `0x${yOffset}`]);
+    await run('xrandr', [...modeArgs(x, await xrandrModeInfo()), '--pos', `0x${yOffset}`]);
   } catch (err: any) {
     console.error(`[outputs] xrandr add ${id} failed: ${err.message}`);
     return;
@@ -240,8 +293,14 @@ async function addOutput(id: string): Promise<void> {
 async function reactivateExisting(o: OutputState): Promise<void> {
   // Defensive: re-run xrandr in case X dropped the mode after a disconnect.
   // Cheap and idempotent.
+  const src = o.mode === 'mirror' && o.mirrorOf ? getOutput(o.mirrorOf) : undefined;
+  if (src) {
+    await sameAs(o, src).then(() => console.log(`[outputs] HOTPLUG re-mirrored ${o.id} to ${src.id}`))
+      .catch((err: any) => console.error(`[outputs] re-mirror ${o.id} failed: ${err.message}`));
+    return;
+  }
   try {
-    await run('xrandr', ['--output', o.id, '--auto', '--pos', `0x${o.yOffset}`]);
+    await run('xrandr', [...modeArgs({ ...o }, await xrandrModeInfo()), '--pos', `0x${o.yOffset}`]);
     console.log(`[outputs] HOTPLUG reactivated ${o.id}`);
   } catch (err: any) {
     console.error(`[outputs] reactivate ${o.id} failed: ${err.message}`);
@@ -270,6 +329,71 @@ function startHotplugWatcher() {
       lastSeenStatus.set(c.id, c.connected);
     }
   }, 5000);
+}
+
+// ── Mirror ──────────────────────────────────────────────────────────────────
+// A mirrored output copies another output's picture in hardware (xrandr --same-as), so the one
+// player or page on the source feeds both screens; a second player doubles the CPU on these
+// two-core boxes. The mirrored output's own Chromium is closed: left open, its window lands on top
+// of the source's picture once both outputs scan out the same framebuffer area (display-1,
+// 2026-10-17: the VGA screen's home QR covered the omtx feed on HDMI).
+
+async function sameAs(o: OutputState, src: OutputState): Promise<void> {
+  const cur = (await xrandrQuery()).find(d => d.id === src.id);
+  const size = `${cur?.width ?? src.width}x${cur?.height ?? src.height}`;
+  // The source's own mode when this output has it: a plain copy, no scaling.
+  if ((await xrandrModeInfo()).get(o.id)?.modes.some(m => `${m.w}x${m.h}` === size)) {
+    await run('xrandr', ['--output', o.id, '--mode', size, '--same-as', src.id]);
+    return;
+  }
+  // Otherwise scale the source's picture onto this output's preferred mode, so a screen with a
+  // different resolution shows all of it. A driver without transforms gets the unscaled copy.
+  try {
+    await run('xrandr', ['--output', o.id, '--auto', '--same-as', src.id, '--scale-from', size]);
+  } catch (err: any) {
+    console.warn(`[outputs] ${o.id} cannot scale to ${size} (${err.message.trim()}); mirroring unscaled`);
+    await run('xrandr', ['--output', o.id, '--auto', '--same-as', src.id]);
+  }
+}
+
+async function closeChromium(o: OutputState): Promise<void> {
+  const proc = o.chromiumProcess;
+  if (!proc) return;
+  o.chromiumProcess = null;
+  await new Promise<void>(resolve => {
+    const t = setTimeout(resolve, 3000);
+    proc.once('exit', () => { clearTimeout(t); resolve(); });
+    try { proc.kill('SIGKILL'); } catch { clearTimeout(t); resolve(); }
+  });
+}
+
+export async function mirrorOutput(o: OutputState, src: OutputState): Promise<void> {
+  // Copy first: if xrandr refuses, the output keeps its own Chromium and picture.
+  await sameAs(o, src);
+  await closeChromium(o);
+  console.log(`[outputs] ${o.id} mirrors ${src.id}`);
+}
+
+// Back to its own area of the framebuffer with its own Chromium. Resolves once that Chromium
+// answers on its CDP port and has had a moment to map its window, so a player started next
+// lands on top of it, not under it.
+export async function unmirrorOutput(o: OutputState): Promise<void> {
+  await run('xrandr', ['--output', o.id, '--scale', '1x1']).catch(() => {});
+  await run('xrandr', [...modeArgs({ ...o }, await xrandrModeInfo()), '--pos', `0x${o.yOffset}`]);
+  if (!o.chromiumProcess) o.chromiumProcess = spawnChromiumForOutput(o);
+  for (let i = 0; i < 30; i++) {
+    if (await cdpGet(o.cdpPort, '/json').then(t => !!t, () => false)) break;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  await new Promise(r => setTimeout(r, 1500));
+  console.log(`[outputs] ${o.id} back on its own screen at +0+${o.yOffset}`);
+}
+
+// Where the output sits in the framebuffer right now, as WxH+X+Y. Read live: a mode changed by
+// hand (xrandr on the box) or a hotplug leaves the sizes in state stale.
+export async function outputGeometry(o: OutputState): Promise<string> {
+  const cur = (await xrandrQuery().catch(() => [] as XrandrOutput[])).find(d => d.id === o.id && d.connected);
+  return cur ? `${cur.width}x${cur.height}+${cur.x}+${cur.y}` : `${o.width}x${o.height}+0+${o.yOffset}`;
 }
 
 export function getOutput(id: string): OutputState | undefined {

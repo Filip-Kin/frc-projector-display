@@ -11,8 +11,9 @@ const PIN_TTL_MS = 4 * 24 * 60 * 60 * 1000;
 
 export interface OutputModeRecord {
   // Tagged unions for each mode the daemon knows how to re-apply on startup
-  mode: 'home' | 'chromium' | 'ndi' | 'queuing';
+  mode: 'home' | 'chromium' | 'ndi' | 'queuing' | 'mirror';
   url?: string;
+  mirrorOf?: string;
   source?: string;
   bandwidth?: 'high' | 'medium' | 'low';
   eventKey?: string;

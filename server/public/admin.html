@@ -256,6 +256,7 @@ function describeOutputMode(rec) {
       try { return `Browser: ${new URL(rec.url).hostname}`; } catch { return 'Browser'; }
     }
     case 'ndi':      return `NDI: ${rec.source ?? '(none)'}`;
+    case 'mirror':   return `Mirror: ${rec.mirrorOf ?? '?'}`;
     case 'queuing': {
       const ev = rec.eventKey ? ` ${rec.eventKey}` : '';
       if (rec.streamType === 'youtube') return `Queuing${ev} · YouTube${rec.streamSource ? ` (${rec.streamSource})` : ''}`;

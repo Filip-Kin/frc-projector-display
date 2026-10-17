@@ -13,7 +13,8 @@ export interface Metrics {
 }
 
 export interface OutputModeRecord {
-  mode: 'home' | 'chromium' | 'ndi' | 'queuing';
+  mode: 'home' | 'chromium' | 'ndi' | 'queuing' | 'mirror';
+  mirrorOf?: string;
   url?: string;
   source?: string;
   bandwidth?: 'high' | 'medium' | 'low';

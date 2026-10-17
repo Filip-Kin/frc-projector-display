@@ -3,7 +3,7 @@ import net from 'net';
 import { WebSocket } from 'ws';
 import { state, OutputState } from './state.js';
 import { cdpNavigate, cdpNavigateAll } from './cdp.js';
-import { getOutput } from './outputs.js';
+import { getOutput, mirrorOutput, unmirrorOutput, outputGeometry } from './outputs.js';
 
 const LOCAL_PORT = parseInt(process.env.LOCAL_PORT ?? '3000', 10);
 const VNC_PORT   = parseInt(process.env.VNC_PORT   ?? '5900', 10);
@@ -36,8 +36,32 @@ export async function stopNdiOnOutput(o: OutputState) {
   }
 }
 
+// Every mode but mirror needs the output's own screen area and Chromium back first.
+async function leaveMirror(o: OutputState) {
+  if (o.mode !== 'mirror') return;
+  o.mode = 'home';
+  o.mirrorOf = undefined;
+  await unmirrorOutput(o);
+}
+
+// Returns a label for the controller when the request is refused, null when applied.
+export async function setMirrorOnOutput(outputId: string, sourceId: string): Promise<string | null> {
+  const o = getOutput(outputId), src = getOutput(sourceId);
+  if (!o || !src) return 'Screen not connected';
+  if (o === src) return 'Same screen';
+  // One level only: a chain would need the source's own picture, which a mirror does not have.
+  if (src.mode === 'mirror') return `${src.id} is a mirror`;
+  if (state.outputs.some(x => x.mode === 'mirror' && x.mirrorOf === o.id)) return `${o.id} is a mirror source`;
+  await stopNdiOnOutput(o);
+  await mirrorOutput(o, src);
+  o.mode = 'mirror';
+  o.mirrorOf = src.id;
+  return null;
+}
+
 export async function setHomeOnOutput(outputId: string) {
   const o = getOutput(outputId); if (!o) return;
+  await leaveMirror(o);
   await stopNdiOnOutput(o);
   o.mode = 'home';
   await cdpNavigate(`http://localhost:${LOCAL_PORT}/`, o.cdpPort);
@@ -45,6 +69,7 @@ export async function setHomeOnOutput(outputId: string) {
 
 export async function setChromiumOnOutput(outputId: string, url: string) {
   const o = getOutput(outputId); if (!o) return;
+  await leaveMirror(o);
   await stopNdiOnOutput(o);
   o.mode = 'chromium';
   await cdpNavigate(url, o.cdpPort);
@@ -60,6 +85,7 @@ export async function setQueuingOnOutput(
   bottom: string = 'updates',
 ) {
   const o = getOutput(outputId); if (!o) return;
+  await leaveMirror(o);
   await stopNdiOnOutput(o);
 
   const u = new URL(`${SERVER_URL}/queuing`);
@@ -98,6 +124,7 @@ export async function setQueuingOnOutput(
 
 export async function setNdiOnOutput(outputId: string, source: string, bandwidth: 'high' | 'medium' | 'low' = 'high') {
   const o = getOutput(outputId); if (!o) return;
+  await leaveMirror(o);
 
   // Fire-and-forget stop of previous NDI on this output (source-switch path)
   stopNdiOnOutput(o);
@@ -108,25 +135,27 @@ export async function setNdiOnOutput(outputId: string, source: string, bandwidth
   await Promise.race([cdpNavigate('about:blank', o.cdpPort), new Promise(r => setTimeout(r, 10000))]);
   if (getOutput(outputId) !== o || playerGen.get(o) !== gen) return;
 
-  const env = {
-    ...process.env,
-    DISPLAY: process.env.DISPLAY ?? ':0',
-    SDL_VIDEO_FULLSCREEN_DISPLAY: String(o.displayIndex),
-  };
-  const proc = spawn(playerFor(source), [source, bandwidth], { env, detached: false });
+  // An always-on-top window over the output's exact area, not SDL fullscreen: fullscreen picks
+  // its screen by SDL display number, and on a second output that put the picture somewhere else
+  // (VGA-1 on filip-display-1 stayed white, then black, while its player was receiving).
+  const geom = await outputGeometry(o);
+  if (getOutput(outputId) !== o || playerGen.get(o) !== gen) return;
+  const env = { ...process.env, DISPLAY: process.env.DISPLAY ?? ':0' };
+  const proc = spawn(playerFor(source), [source, bandwidth, '--window', geom], { env, detached: false });
   proc.on('exit', code => {
     console.log(`[ndi:${o.id}] exited (${code})`);
     if (o.ndiProcess === proc) o.ndiProcess = null;
   });
   o.ndiProcess = proc;
   o.mode = 'ndi';
-  console.log(`[ndi:${o.id}] started for: ${source} (bandwidth: ${bandwidth}, display=${o.displayIndex})`);
+  console.log(`[ndi:${o.id}] started for: ${source} (bandwidth: ${bandwidth}, window=${geom})`);
 }
 
 // Mirror helpers used by AP / identify / connecting flows
 export async function setHomeAll() {
   for (const o of state.outputs) await stopNdiOnOutput(o);
-  for (const o of state.outputs) o.mode = 'home';
+  // A mirror keeps mirroring: its source shows the same page.
+  for (const o of state.outputs) if (o.mode !== 'mirror') o.mode = 'home';
   await cdpNavigateAll(`http://localhost:${LOCAL_PORT}/`);
 }
 

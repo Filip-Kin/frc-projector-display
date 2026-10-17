@@ -9,7 +9,8 @@ export interface OutputState {
   yOffset: number;       // position in vertical-stacked framebuffer
   displayIndex: number;  // SDL_VIDEO_FULLSCREEN_DISPLAY index
   cdpPort: number;       // chromium remote-debugging port
-  mode: string;          // 'home' | 'chromium' | 'ndi'
+  mode: string;          // 'home' | 'chromium' | 'ndi' | 'queuing' | 'mirror'
+  mirrorOf?: string;     // mode 'mirror': the output whose picture this one copies
   ndiProcess: ChildProcess | null;
   chromiumProcess: ChildProcess | null;
 }

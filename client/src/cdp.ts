@@ -40,5 +40,6 @@ export async function cdpNavigate(targetUrl: string, port: number): Promise<void
 }
 
 export async function cdpNavigateAll(targetUrl: string): Promise<void> {
-  await Promise.all(state.outputs.map(o => cdpNavigate(targetUrl, o.cdpPort)));
+  // A mirrored output has no Chromium of its own; it shows its source's window.
+  await Promise.all(state.outputs.filter(o => o.mode !== 'mirror').map(o => cdpNavigate(targetUrl, o.cdpPort)));
 }
