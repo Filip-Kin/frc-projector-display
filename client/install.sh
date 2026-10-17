@@ -13,7 +13,7 @@ set -e
 # compares it with /etc/frc-display/install-rev at boot and re-runs the
 # installer (frc-install) when it is newer, so helper-script and system fixes
 # reach boxes already in the field, not just new installs.
-INSTALL_REV=7
+INSTALL_REV=8
 
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
@@ -160,39 +160,53 @@ net.ipv6.conf.default.ignore_routes_with_linkdown=1
 SYSCTL
 sysctl --system >/dev/null 2>&1 || true
 
-# Tell NM to leave /etc/resolv.conf alone, and disable NM's internal
-# connectivity check (which probes nmcheck.gnome.org -- frequently blocked
-# by Pi-hole and other ad-blockers, causing nmcli con up to spend 15+s
-# waiting for its own probe to time out before declaring the connection
-# activated).
+# DNS comes from whatever network the box is on (DHCP), never a fixed server.
+# Until rev 8 this wrote an immutable resolv.conf with 1.1.1.1 / 8.8.8.8 so a
+# Pi-holed home LAN could not leave the box unable to resolve the server; venue
+# networks that block or intercept outside DNS then had no working DNS at all.
+# Two clients hand out DNS here: NetworkManager (Wi-Fi) and dhcpcd (the wired
+# port, run by ifupdown). openresolv merges both into /etc/resolv.conf, each
+# under its own interface, so neither overwrites the other. A box that cannot
+# fetch openresolv (installer run offline) still gets DHCP DNS: NM writes the
+# file directly, and dhcpcd's own hook does the same for the wired port.
+chattr -i /etc/resolv.conf 2>/dev/null || true
+if [ "$PKG_MGR" = apt ]; then
+  apt-get install -y openresolv >/dev/null 2>&1 || echo "  [dns] Warning: openresolv did not install"
+fi
+if command -v resolvconf >/dev/null 2>&1; then RC_MANAGER=resolvconf; else RC_MANAGER=file; fi
+# NM's connectivity check stays off: it probes nmcheck.gnome.org, which
+# Pi-hole and other ad-blockers often block, and nmcli con up then waits 15+s
+# for that probe to time out before declaring the connection activated.
 mkdir -p /etc/NetworkManager/conf.d
-cat > /etc/NetworkManager/conf.d/no-dns.conf << 'NMDNS'
+rm -f /etc/NetworkManager/conf.d/no-dns.conf
+cat > /etc/NetworkManager/conf.d/frc-dns.conf << NMDNS
 [main]
-dns=none
-rc-manager=unmanaged
+dns=default
+rc-manager=${RC_MANAGER}
 
 [connectivity]
 enabled=false
 NMDNS
-
-# Static fallback DNS so the daemon can always reach the control server
-# regardless of which network connection (or AP mode) is active.
-# We make the file IMMUTABLE because Debian's dhcpcd hooks (or any other
-# installed network plumbing -- resolvconf, systemd-resolved, etc.) will
-# happily overwrite it with the network's local DNS the next time DHCP
-# fires, which on a Pi-holed LAN means we can't resolve display.filipkin.com
-# from a wifi network that can't route to the Pi-hole.
-chattr -i /etc/resolv.conf 2>/dev/null || true
-cat > /etc/resolv.conf << 'RESOLVCONF'
-# Static; managed by FRC Projector Display install.sh
-nameserver 1.1.1.1
-nameserver 8.8.8.8
-RESOLVCONF
-chattr +i /etc/resolv.conf 2>/dev/null || true
+# The old static file must not survive as content either: with openresolv it
+# is regenerated from the interfaces below; with NM writing it directly, NM
+# replaces it on the next connection change.
+if grep -q "managed by FRC Projector Display" /etc/resolv.conf 2>/dev/null; then
+  rm -f /etc/resolv.conf
+fi
 # Stop dhcpcd if it's been pulled in as a transitive dep (some Debian
 # installer profiles include it even though NM handles DHCP).
 systemctl disable --now dhcpcd 2>/dev/null || true
 systemctl restart NetworkManager 2>/dev/null || true
+# Re-announce the wired port's lease so its DNS reaches the new resolv.conf
+# without waiting for a renewal. Only when ifupdown's dhcpcd is already
+# running: with none running, dhcpcd -n would start a second one.
+if pgrep -x dhcpcd >/dev/null; then
+  for d in /sys/class/net/*; do
+    [ -e "$d/device" ] && [ ! -d "$d/wireless" ] || continue
+    dhcpcd -n "$(basename "$d")" >/dev/null 2>&1 || true
+  done
+fi
+[ "$RC_MANAGER" = resolvconf ] && resolvconf -u 2>/dev/null || true
 # Disable system dnsmasq — it grabs port 53 and prevents NM's built-in dnsmasq
 # from running for the WiFi AP, leaving phones stuck on "obtaining IP address"
 systemctl disable --now dnsmasq 2>/dev/null || true
