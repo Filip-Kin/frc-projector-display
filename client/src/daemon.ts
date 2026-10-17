@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws';
 import { exec, execFile, execSync } from 'child_process';
 import { hostname as osHostname, uptime as osUptime } from 'os';
+import { existsSync } from 'fs';
 
 // Singleton enforcement: a stale daemon left running from a previous
 // lifecycle (e.g. AP-mode handoff that didn't reach a clean systemctl
@@ -28,7 +29,7 @@ import { initOutputs, setOnOutputsChanged } from './outputs.js';
 import { getAudioSinks, getAudioState, setAudioOutput } from './audio.js';
 import { getNdiSources } from './ndi.js';
 import { localServer, httpServer80, httpsServer, LOCAL_PORT, enterApMode, initServer, stopProvisioningExtras, applyCredentials, setPort80Up } from './local-server.js';
-import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp, hasLocalLink, getNetworkSnapshot } from './network.js';
+import { getEthernetInterface, getEthernetStatus, applyFieldStaticIp, hasLocalLink, getNetworkSnapshot, setPrimaryRoute, setWifiRadio, getLocalAddresses } from './network.js';
 import { emit, initLocalControl, attachLocalControl, hasLocalControllers } from './control.js';
 import { checkInternet, scanWifi } from './wifi.js';
 import { startNetworkMonitor } from './network-monitor.js';
@@ -158,6 +159,15 @@ async function replayPersistedOutputs() {
   }
 }
 
+// Starts every full-screen stream player again on its saved source.
+async function restartStreams() {
+  const recs = getPersistedOutputs();
+  for (const o of state.outputs) {
+    const r = recs[o.id];
+    if (r?.mode === 'ndi' && r.source && o.mode === 'ndi') setNdiOnOutput(o.id, r.source, r.bandwidth ?? 'high');
+  }
+}
+
 state.forceWsReconnect = () => {
   log('info', '[ws] force reconnect requested');
   if (state.serverWs) {
@@ -254,6 +264,33 @@ async function handleCommand(msg: any) {
     case 'network_status':
       emit({ type: 'network', ...(await getNetworkSnapshot()) });
       break;
+    case 'set_primary_route':
+    case 'set_wifi': {
+      try {
+        if (msg.type === 'set_primary_route') {
+          if (msg.route !== 'wired' && msg.route !== 'wifi') break;
+          await setPrimaryRoute(msg.route);
+        } else {
+          // Off with no wired address cuts the box (and this controller) off the network.
+          if (!msg.on && !(await getLocalAddresses()).some(a => !existsSync(`/sys/class/net/${a.iface}/wireless`))) {
+            emit({ type: 'error', message: 'No wired link' });
+            emit({ type: 'network', ...(await getNetworkSnapshot()) });
+            break;
+          }
+          await setWifiRadio(!!msg.on);
+        }
+        log('info', `[net] ${msg.type === 'set_wifi' ? `wifi ${msg.on ? 'on' : 'off'}` : `primary route ${msg.route}`}`);
+        // A stream keeps the link it connected over; start the players again so they follow the
+        // new route.
+        await new Promise(r => setTimeout(r, 2000));
+        await restartStreams();
+      } catch (err: any) {
+        log('error', `[net] ${msg.type} failed: ${err.message}`);
+        emit({ type: 'error', message: 'Network change failed' });
+      }
+      emit({ type: 'network', ...(await getNetworkSnapshot()) });
+      break;
+    }
     case 'wifi_scan':
       emit({ type: 'wifi_networks', networks: await scanWifi().catch(() => []) });
       break;

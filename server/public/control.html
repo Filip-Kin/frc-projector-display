@@ -319,6 +319,10 @@
   }
   #network-section input[type=text] { background: #252525; }
   #network-section input[type=password]:focus { border-color: #4af; }
+  #net-manage.hidden { display: none; }
+  .seg { display: flex; gap: 6px; }
+  .seg button { flex: 1; padding: 9px; font-size: 0.85rem; }
+  .seg button.on { background: #0d1f2d; color: #4af; border-color: #4af; }
   #wifi-join-status { font-size: 0.85rem; color: #888; min-height: 1.2em; }
   #wifi-join-status.ok { color: #6f6; }
   #wifi-join-status.err { color: #f66; }
@@ -519,6 +523,18 @@
   <div class="section-title" data-daemon-only>Network</div>
   <div id="network-section" data-daemon-only>
     <div id="net-status"></div>
+    <div id="net-manage" class="hidden">
+      <label>Primary route</label>
+      <div class="seg">
+        <button type="button" class="secondary" id="route-wired" onclick="setPrimaryRoute('wired')">Wired</button>
+        <button type="button" class="secondary" id="route-wifi" onclick="setPrimaryRoute('wifi')">Wi-Fi</button>
+      </div>
+      <label>Wi-Fi radio</label>
+      <div class="seg">
+        <button type="button" class="secondary" id="wifi-on" onclick="setWifi(true)">On</button>
+        <button type="button" class="secondary" id="wifi-off" onclick="setWifi(false)">Off</button>
+      </div>
+    </div>
     <label>Wi-Fi</label>
     <div id="wifi-list"></div>
     <div class="wifi-form">
@@ -1081,6 +1097,22 @@ function updateNetwork(n) {
   if (!rows.length) rows.push('<div class="net-row"><span class="k">Links</span><span class="v no">None</span></div>');
   rows.push(`<div class="net-row"><span class="k">Internet</span><span class="v ${n.internet ? 'yes' : 'no'}">${n.internet ? 'Yes' : 'No'}</span></div>`);
   document.getElementById('net-status').innerHTML = rows.join('');
+  document.getElementById('net-manage').classList.toggle('hidden', !n.manageable);
+  for (const [id, on] of [['route-wired', n.primary === 'wired'], ['route-wifi', n.primary === 'wifi'], ['wifi-on', n.wifiOn], ['wifi-off', n.wifiOn === false]]) {
+    const b = document.getElementById(id);
+    b.classList.toggle('on', !!on);
+    b.disabled = false;
+  }
+}
+
+function setPrimaryRoute(route) {
+  if (!sendMsg({ type: 'set_primary_route', route })) return;
+  document.querySelectorAll('#net-manage .seg button').forEach(b => b.disabled = true);
+}
+
+function setWifi(on) {
+  if (!sendMsg({ type: 'set_wifi', on })) return;
+  document.querySelectorAll('#net-manage .seg button').forEach(b => b.disabled = true);
 }
 
 function scanWifi() {

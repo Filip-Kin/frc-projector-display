@@ -126,14 +126,49 @@ export interface NetworkSnapshot {
   interfaces: { iface: string; kind: 'wired' | 'wifi'; ip: string; ssid: string | null }[];
   defaultIface: string | null;
   internet: boolean;
+  primary: 'wired' | 'wifi';
+  wifiOn: boolean;
+  // frc-net is installed (installer rev 9); without it the box cannot change either setting.
+  manageable: boolean;
+}
+
+const FRC_NET = '/usr/local/bin/frc-net';
+const ROUTE_CONF = '/etc/NetworkManager/conf.d/frc-route.conf';
+
+// Which link carries traffic when both are up, from the file frc-net writes. No file (installer
+// before rev 9) means NetworkManager's own order, where Wi-Fi wins.
+function readPrimary(): 'wired' | 'wifi' {
+  try { return /route-metric=50\b/.test(readFileSync(ROUTE_CONF, 'utf8')) ? 'wifi' : 'wired'; }
+  catch { return 'wifi'; }
+}
+
+export function wifiRadioOn(): Promise<boolean> {
+  return new Promise(r => exec('nmcli radio wifi 2>/dev/null', (_e, out) => r((out || '').trim() !== 'disabled')));
+}
+
+function frcNet(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('sudo', [FRC_NET, ...args], { timeout: 20000 }, (err, _o, stderr) => {
+      if (err) reject(new Error((stderr || err.message).trim())); else resolve();
+    });
+  });
+}
+
+export async function setPrimaryRoute(route: 'wired' | 'wifi'): Promise<void> {
+  await frcNet(['route', route]);
+}
+
+export async function setWifiRadio(on: boolean): Promise<void> {
+  await frcNet(['wifi', on ? 'on' : 'off']);
 }
 export async function getNetworkSnapshot(): Promise<NetworkSnapshot> {
   const sh = (cmd: string) => new Promise<string>(r => exec(cmd, (_e, out) => r(out || '')));
-  const [addrs, ssidOut, routeOut, net] = await Promise.all([
+  const [addrs, ssidOut, routeOut, net, wifiOn] = await Promise.all([
     getLocalAddresses(true),
     sh("nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | grep '^yes:' | head -1"),
     sh('ip route show default 2>/dev/null'),
     checkInternet(),
+    wifiRadioOn(),
   ]);
   const ssid = ssidOut.trim().replace(/^yes:/, '').replace(/\\:/g, ':') || null;
   return {
@@ -143,5 +178,8 @@ export async function getNetworkSnapshot(): Promise<NetworkSnapshot> {
     }),
     defaultIface: routeOut.match(/\bdev (\S+)/)?.[1] ?? null,
     internet: net.online,
+    primary: readPrimary(),
+    wifiOn,
+    manageable: existsSync(FRC_NET),
   };
 }

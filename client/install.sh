@@ -13,7 +13,7 @@ set -e
 # compares it with /etc/frc-display/install-rev at boot and re-runs the
 # installer (frc-install) when it is newer, so helper-script and system fixes
 # reach boxes already in the field, not just new installs.
-INSTALL_REV=8
+INSTALL_REV=9
 
 SERVER_URL="${SERVER_URL:-https://display.filipkin.com}"
 SERVICE_USER="${SERVICE_USER:-display}"
@@ -187,6 +187,19 @@ rc-manager=${RC_MANAGER}
 [connectivity]
 enabled=false
 NMDNS
+# Wired wins over Wi-Fi when both are up. Both usually sit on the same subnet
+# at a venue; NetworkManager's Wi-Fi route (metric 600) beat the wired port's
+# (dhcpcd, 1000 + ifindex), so video came in over Wi-Fi with the cable plugged
+# in (display-1, 2026-10-17: 1.2 MB/s over Wi-Fi, lagging, versus 17 MB/s
+# wired). frc-net writes this file; the control page's Primary route flips it.
+# Kept as is when present, so a box set to Wi-Fi stays on Wi-Fi.
+[ -f /etc/NetworkManager/conf.d/frc-route.conf ] || cat > /etc/NetworkManager/conf.d/frc-route.conf << 'NMROUTE'
+# Written by frc-net. Wi-Fi route metric: 3000 = wired first, 50 = Wi-Fi first.
+[connection-frc-wifi-route]
+match-device=type:wifi
+ipv4.route-metric=3000
+ipv6.route-metric=3000
+NMROUTE
 # The old static file must not survive as content either: with openresolv it
 # is regenerated from the interfaces below; with NM writing it directly, NM
 # replaces it on the next connection change.
@@ -278,6 +291,9 @@ cat > /usr/local/bin/frc-ap-start << 'SCRIPT'
 PIN="$1"; IFACE="$2"
 SSID="Display-${PIN}"
 
+# Wi-Fi may be switched off from the control page; the hotspot needs it.
+nmcli radio wifi on 2>/dev/null || true
+
 # Clean any leftover AP profile
 nmcli con delete "frc-provision" 2>/dev/null || true
 
@@ -324,6 +340,7 @@ cat > /usr/local/bin/frc-wifi-connect << 'SCRIPT'
 SSID="$1"; PASS="$2"
 log() { echo "[frc-wifi $(date +%T.%3N)] $*"; }
 
+nmcli radio wifi on 2>/dev/null || true
 IFACE=$(nmcli -t -f DEVICE,TYPE device status 2>/dev/null | awk -F: '$2=="wifi" {print $1; exit}')
 [ -z "$IFACE" ] && { log "ERR no wifi interface"; exit 1; }
 log "iface=$IFACE ssid=\"$SSID\" pass_len=${#PASS}"
@@ -522,10 +539,51 @@ nmcli dev connect "$IFACE" 2>/dev/null || true
 SCRIPT
 chmod 755 /usr/local/bin/frc-eth-dhcp
 
+cat > /usr/local/bin/frc-net << 'SCRIPT'
+#!/bin/bash
+# frc-net route {wired|wifi}   which link carries traffic when both are up
+# frc-net wifi {on|off}        Wi-Fi radio (persists across reboots)
+CONF=/etc/NetworkManager/conf.d/frc-route.conf
+case "$1 $2" in
+  "wifi on")  exec nmcli radio wifi on ;;
+  "wifi off") exec nmcli radio wifi off ;;
+  "route wired") M=3000 ;;
+  "route wifi")  M=50 ;;
+  *) echo "usage: frc-net route {wired|wifi} | wifi {on|off}" >&2; exit 2 ;;
+esac
+# Wired is dhcpcd (metric 1000 + ifindex) or NetworkManager (100): 3000 loses
+# to both, 50 beats both.
+cat > "$CONF" << EOF
+# Written by frc-net. Wi-Fi route metric: 3000 = wired first, 50 = Wi-Fi first.
+[connection-frc-wifi-route]
+match-device=type:wifi
+ipv4.route-metric=$M
+ipv6.route-metric=$M
+EOF
+nmcli general reload conf 2>/dev/null || true
+# Saved Wi-Fi profiles get it too (a per-profile metric overrides the file),
+# then the live connection takes it without dropping.
+nmcli -t -f NAME,TYPE connection show | awk -F: '$2=="802-11-wireless"{print $1}' | while read -r N; do
+  [ "$N" = frc-provision ] && continue
+  nmcli connection modify "$N" ipv4.route-metric "$M" ipv6.route-metric "$M" 2>/dev/null || true
+done
+nmcli -t -f DEVICE,TYPE,STATE device status | awk -F: '$2=="wifi" && $3=="connected"{print $1}' | while read -r D; do
+  nmcli device reapply "$D" 2>/dev/null || true
+done
+SCRIPT
+chmod 755 /usr/local/bin/frc-net
+# Profiles saved before rev 9 carry NM's default metric; give them the box's
+# current choice.
+if grep -q 'route-metric=50' /etc/NetworkManager/conf.d/frc-route.conf 2>/dev/null; then
+  /usr/local/bin/frc-net route wifi >/dev/null 2>&1 || true
+else
+  /usr/local/bin/frc-net route wired >/dev/null 2>&1 || true
+fi
+
 # ── Sudoers for WiFi + ethernet helpers ───────────────────────────────────────
 echo "[10] Configuring sudoers..."
 cat > /etc/sudoers.d/frc-display << SUDOCONF
-${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-wifi-up, /usr/local/bin/frc-handoff, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm, /bin/systemctl restart display-daemon
+${SERVICE_USER} ALL=(root) NOPASSWD: /usr/local/bin/frc-ap-start, /usr/local/bin/frc-ap-stop, /usr/local/bin/frc-wifi-connect, /usr/local/bin/frc-wifi-up, /usr/local/bin/frc-handoff, /usr/local/bin/frc-install, /usr/local/bin/frc-eth-static, /usr/local/bin/frc-eth-dhcp, /usr/local/bin/frc-net, /usr/local/bin/frc-usb-mount, /usr/local/bin/frc-usb-unmount, /bin/systemctl restart lightdm, /bin/systemctl restart display-daemon
 SUDOCONF
 chmod 440 /etc/sudoers.d/frc-display
 

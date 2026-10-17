@@ -26,7 +26,11 @@ export function ensureSavedWifiConnected(): Promise<void> {
 
 function ensureSavedWifiOnce(): Promise<void> {
   return new Promise((resolve) => {
-    exec("nmcli -t -f NAME,TYPE,STATE con show", (err, stdout) => {
+    // Wi-Fi switched off from the control page stays off.
+    exec("nmcli radio wifi 2>/dev/null; nmcli -t -f NAME,TYPE,STATE con show", (err, out) => {
+      const [radio, ...rest] = (out || '').split('\n');
+      if (radio.trim() === 'disabled') { resolve(); return; }
+      const stdout = rest.join('\n');
       if (err) { resolve(); return; }
       const lines = stdout.trim().split('\n');
       let target: string | null = null;
